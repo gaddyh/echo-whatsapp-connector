@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Exec(sed)",
+      "Exec(node)",
+      "Exec(npm run)",
+      "Exec(npm test)",
+      "Exec(timeout)",
+      "Exec(npx tsx)",
+      "Exec(bash)",
+      "Exec(awk)",
+      "Exec(curl)",
+      "Exec(psql)",
+      "Exec(jq)"
+    ]
+  }
+}
