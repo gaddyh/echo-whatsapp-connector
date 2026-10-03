@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS whatsapp_connector.connections (
   last_connected_at timestamptz,
   last_event_at timestamptz,
   last_disconnect_reason text,
-  reconnect_count integer NOT NULL DEFAULT 0
+  reconnect_count integer NOT NULL DEFAULT 0,
+  state_version bigint NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS ix_connections_worker_status

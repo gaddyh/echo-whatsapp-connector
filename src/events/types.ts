@@ -1,3 +1,7 @@
+export function connectionStateEventId(connectionId: string, stateVersion: number): string {
+  return `state:${connectionId}:${stateVersion}`
+}
+
 export type ConnectionStatus =
   | 'provisioning'
   | 'connecting'
@@ -47,6 +51,7 @@ export interface NormalizedConnectionEvent {
   connection_id: string
   status: ConnectionStatus
   provider_raw_status?: string
+  state_version?: number
   timestamp: string
 }
 
