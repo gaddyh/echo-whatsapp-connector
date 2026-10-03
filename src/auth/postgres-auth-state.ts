@@ -6,6 +6,7 @@ import {
 } from '@whiskeysockets/baileys'
 import type { Pool } from 'pg'
 import { decrypt, encrypt } from './crypto.js'
+import { LostClaimError } from '../db/repositories.js'
 
 function encode(value: unknown): Buffer {
   return Buffer.from(JSON.stringify(value, BufferJSON.replacer), 'utf8')
@@ -17,8 +18,18 @@ function decode<T>(value: Buffer): T {
 
 export async function createPostgresAuthState(
   db: Pool,
-  connectionId: string
+  connectionId: string,
+  claimToken: string
 ): Promise<{ state: AuthenticationState; saveCreds: () => Promise<void>; clear: () => Promise<void> }> {
+  const assertClaim = async (client: Pick<Pool, 'query'>): Promise<void> => {
+    const result = await client.query(
+      `SELECT 1 FROM whatsapp_connector.connections
+        WHERE id=$1 AND claim_token=$2::uuid AND claim_expires_at > now()
+        FOR UPDATE`,
+      [connectionId, claimToken]
+    )
+    if (result.rowCount !== 1) throw new LostClaimError(connectionId)
+  }
   const credsRes = await db.query(
     'SELECT encrypted_payload FROM whatsapp_connector.auth_credentials WHERE connection_id=$1',
     [connectionId]
@@ -45,6 +56,7 @@ export async function createPostgresAuthState(
       const client = await db.connect()
       try {
         await client.query('BEGIN')
+        await assertClaim(client)
         for (const [category, entries] of Object.entries(data)) {
           for (const [keyId, value] of Object.entries(entries ?? {})) {
             if (value == null) {
@@ -77,19 +89,31 @@ export async function createPostgresAuthState(
   const state: AuthenticationState = { creds, keys }
 
   const saveCreds = async () => {
-    await db.query(
-      `INSERT INTO whatsapp_connector.auth_credentials(connection_id, encrypted_payload)
-       VALUES($1,$2)
-       ON CONFLICT(connection_id)
-       DO UPDATE SET encrypted_payload=EXCLUDED.encrypted_payload, updated_at=now()`,
-      [connectionId, encrypt(encode(state.creds))]
-    )
+    const client = await db.connect()
+    try {
+      await client.query('BEGIN')
+      await assertClaim(client)
+      await client.query(
+        `INSERT INTO whatsapp_connector.auth_credentials(connection_id, encrypted_payload)
+         VALUES($1,$2)
+         ON CONFLICT(connection_id)
+         DO UPDATE SET encrypted_payload=EXCLUDED.encrypted_payload, updated_at=now()`,
+        [connectionId, encrypt(encode(state.creds))]
+      )
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
   }
 
   const clear = async () => {
     const client = await db.connect()
     try {
       await client.query('BEGIN')
+      await assertClaim(client)
       await client.query('DELETE FROM whatsapp_connector.auth_keys WHERE connection_id=$1', [connectionId])
       await client.query('DELETE FROM whatsapp_connector.auth_credentials WHERE connection_id=$1', [connectionId])
       await client.query('COMMIT')

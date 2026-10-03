@@ -8,12 +8,21 @@ import {
 import type { Pool } from 'pg'
 import { createPostgresAuthState } from '../auth/postgres-auth-state.js'
 import { env } from '../config/env.js'
+import { INSTANCE_ID } from '../config/process-identity.js'
 import { eventSink } from '../events/sink.js'
 import type { ConnectionStatus, NormalizedConnectionEvent } from '../events/types.js'
 import { logger } from '../observability/logger.js'
 import { normalizeMessage } from '../baileys/message-normalizer.js'
 import { resolveWaVersion } from '../baileys/version-provider.js'
-import { getGroupSubject, updateConnectionStatus, upsertGroup, upsertIdentity } from '../db/repositories.js'
+import {
+  getGroupSubject,
+  LostClaimError,
+  renewClaim,
+  updateConnectionStatus,
+  updateConnectionStatusAndEvent,
+  upsertGroup,
+  upsertIdentity
+} from '../db/repositories.js'
 
 export class Session {
   private sock?: WASocket
@@ -21,35 +30,87 @@ export class Session {
   private qr?: string
   private reconnectAttempt = 0
   private stopped = false
+  private lostClaim = false
+  private heartbeat?: NodeJS.Timeout
+  private reconnectTimer?: NodeJS.Timeout
   private apiSentMessageIds = new Set<string>()
 
-  constructor(readonly connectionId: string, private readonly db: Pool) {}
+  constructor(
+    readonly connectionId: string,
+    private readonly db: Pool,
+    private readonly claimToken: string,
+    private readonly onLostClaim: () => void
+  ) {
+    this.heartbeat = setInterval(() => void this.renew(), 10_000)
+  }
 
   get socket(): WASocket | undefined { return this.sock }
   get latestQr(): string | undefined { return this.qr }
+  get capability(): string { return this.claimToken }
+
+  private loseClaim(err?: unknown): void {
+    if (this.lostClaim) return
+    this.lostClaim = true
+    this.stopped = true
+    if (this.heartbeat) clearInterval(this.heartbeat)
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    try { this.sock?.end(undefined) } catch { /* best effort */ }
+    this.sock = undefined
+    logger.warn({ err, connection_id: this.connectionId, instance_id: INSTANCE_ID }, 'connection claim lost')
+    this.onLostClaim()
+  }
+
+  private async renew(): Promise<void> {
+    if (this.stopped || this.lostClaim) return
+    try {
+      if (!await renewClaim(this.connectionId, INSTANCE_ID, this.claimToken)) this.loseClaim()
+    } catch (err) {
+      logger.error({ err, connection_id: this.connectionId }, 'claim renewal failed')
+      this.loseClaim(err)
+    }
+  }
 
   async start(): Promise<void> {
     this.stopped = false
     await this.openSocket()
   }
 
-  private async publishState(status: ConnectionStatus, raw?: string): Promise<void> {
-    await updateConnectionStatus(this.connectionId, status, raw)
-    const event: NormalizedConnectionEvent = {
-      event_type: 'connection_state',
-      event_id: `state:${this.connectionId}:${status}:${Date.now()}`,
-      provider: 'baileys',
-      connection_id: this.connectionId,
-      status,
-      provider_raw_status: raw,
-      timestamp: new Date().toISOString()
+  private async publishState(
+    status: ConnectionStatus,
+    raw?: string,
+    disconnectReason?: string
+  ): Promise<void> {
+    try {
+      if (env.EVENT_SINK === 'db') {
+        await updateConnectionStatusAndEvent(this.connectionId, this.claimToken, status, raw, disconnectReason)
+        return
+      }
+
+      await updateConnectionStatus(this.connectionId, this.claimToken, status, raw, disconnectReason)
+      const event: NormalizedConnectionEvent = {
+        event_type: 'connection_state',
+        event_id: `state:${this.connectionId}:${status}:${Date.now()}`,
+        provider: 'baileys',
+        connection_id: this.connectionId,
+        status,
+        provider_raw_status: raw,
+        timestamp: new Date().toISOString()
+      }
+      await eventSink.publish(event, this.claimToken)
+    } catch (err) {
+      if (err instanceof LostClaimError) {
+        this.loseClaim(err)
+        return
+      }
+      throw err
     }
-    await eventSink.publish(event)
   }
 
   private async openSocket(): Promise<void> {
+    if (this.stopped || this.lostClaim) return
     await this.publishState('connecting', 'opening_socket')
-    this.auth = await createPostgresAuthState(this.db, this.connectionId)
+    if (this.stopped || this.lostClaim) return
+    this.auth = await createPostgresAuthState(this.db, this.connectionId, this.claimToken)
     const version = await resolveWaVersion()
 
     const sock = makeWASocket({
@@ -69,7 +130,10 @@ export class Session {
 
     sock.ev.on('creds.update', async () => {
       try { await this.auth?.saveCreds() }
-      catch (err) { logger.error({ err, connection_id: this.connectionId }, 'failed to persist credentials') }
+      catch (err) {
+        if (err instanceof LostClaimError) this.loseClaim(err)
+        else logger.error({ err, connection_id: this.connectionId }, 'failed to persist credentials')
+      }
     })
 
     sock.ev.on('connection.update', async update => {
@@ -100,8 +164,11 @@ export class Session {
           this.apiSentMessageIds.delete(event.provider_message_id)
         }
         if (event.sender) {
-          try { await upsertIdentity(this.connectionId, event.sender) }
-          catch (err) { logger.warn({ err, connection_id: this.connectionId }, 'identity upsert failed') }
+          try { await upsertIdentity(this.connectionId, this.claimToken, event.sender) }
+          catch (err) {
+            if (err instanceof LostClaimError) this.loseClaim(err)
+            else logger.warn({ err, connection_id: this.connectionId }, 'identity upsert failed')
+          }
         }
         if (event.is_group) {
           try {
@@ -109,10 +176,13 @@ export class Session {
             if (!subject && this.sock) {
               const meta = await this.sock.groupMetadata(event.chat_id)
               subject = meta?.subject
-              if (subject) await upsertGroup(this.connectionId, event.chat_id, subject, meta?.owner)
+              if (subject) await upsertGroup(this.connectionId, this.claimToken, event.chat_id, subject, meta?.owner)
             }
             if (subject) event.chat_name = subject
-          } catch (err) { logger.warn({ err, connection_id: this.connectionId, chat_id: event.chat_id }, 'group subject lookup failed') }
+          } catch (err) {
+            if (err instanceof LostClaimError) this.loseClaim(err)
+            else logger.warn({ err, connection_id: this.connectionId, chat_id: event.chat_id }, 'group subject lookup failed')
+          }
         }
         try { await eventSink.publish(event) }
         catch (err) { logger.error({ err, connection_id: this.connectionId }, 'event publish failed') }
@@ -127,7 +197,7 @@ export class Session {
         const phoneJid = c.phoneNumber ?? (id.endsWith('@s.whatsapp.net') ? id : undefined)
         const canonical = lid ?? phoneJid ?? id
         try {
-          await upsertIdentity(this.connectionId, {
+          await upsertIdentity(this.connectionId, this.claimToken, {
             canonical_id: canonical,
             lid,
             phone_jid: phoneJid,
@@ -135,23 +205,30 @@ export class Session {
             display_name: c.name ?? c.notify ?? c.verifiedName
           })
         } catch (err) {
-          logger.warn({ err, connection_id: this.connectionId }, 'contact upsert failed')
+          if (err instanceof LostClaimError) this.loseClaim(err)
+          else logger.warn({ err, connection_id: this.connectionId }, 'contact upsert failed')
         }
       }
     })
 
     sock.ev.on('groups.upsert', async groups => {
       for (const g of groups as any[]) {
-        try { await upsertGroup(this.connectionId, g.id, g.subject, g.ownerPn ?? g.owner) }
-        catch (err) { logger.warn({ err, connection_id: this.connectionId }, 'group upsert failed') }
+        try { await upsertGroup(this.connectionId, this.claimToken, g.id, g.subject, g.ownerPn ?? g.owner) }
+        catch (err) {
+          if (err instanceof LostClaimError) this.loseClaim(err)
+          else logger.warn({ err, connection_id: this.connectionId }, 'group upsert failed')
+        }
       }
     })
 
     sock.ev.on('groups.update', async groups => {
       for (const g of groups as any[]) {
         if (!g.id) continue
-        try { await upsertGroup(this.connectionId, g.id, g.subject, g.owner ?? undefined) }
-        catch (err) { logger.warn({ err, connection_id: this.connectionId }, 'group update failed') }
+        try { await upsertGroup(this.connectionId, this.claimToken, g.id, g.subject, g.owner ?? undefined) }
+        catch (err) {
+          if (err instanceof LostClaimError) this.loseClaim(err)
+          else logger.warn({ err, connection_id: this.connectionId }, 'group update failed')
+        }
       }
     })
   }
@@ -160,18 +237,28 @@ export class Session {
     if (this.stopped) return
 
     if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-      await this.publishState('pairing_required', `logged_out:${statusCode}`)
+      await this.publishState(
+        'pairing_required',
+        `logged_out:${statusCode}`,
+        `logged_out:${statusCode}`
+      )
       return
     }
 
-    await this.publishState('degraded', `disconnect:${statusCode || 'unknown'}`)
+    await this.publishState(
+      'degraded',
+      `disconnect:${statusCode || 'unknown'}`,
+      `disconnect:${statusCode || 'unknown'}`
+    )
     const delay = Math.min(
       env.RECONNECT_MAX_DELAY_MS,
       env.RECONNECT_BASE_DELAY_MS * 2 ** Math.min(this.reconnectAttempt++, 8)
     )
-    setTimeout(() => {
-      if (!this.stopped) void this.openSocket().catch(err => {
-        logger.error({ err, connection_id: this.connectionId }, 'reconnect failed')
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined
+      if (!this.stopped && !this.lostClaim) void this.openSocket().catch(err => {
+        if (err instanceof LostClaimError) this.loseClaim(err)
+        else logger.error({ err, connection_id: this.connectionId }, 'reconnect failed')
       })
     }, delay)
   }
@@ -192,6 +279,8 @@ export class Session {
 
   async unpair(): Promise<void> {
     this.stopped = true
+    if (this.heartbeat) clearInterval(this.heartbeat)
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     if (this.sock) {
       try { await this.sock.logout() }
       catch (err) { logger.warn({ err, connection_id: this.connectionId }, 'logout returned error') }
@@ -204,6 +293,8 @@ export class Session {
 
   async stop(): Promise<void> {
     this.stopped = true
+    if (this.heartbeat) clearInterval(this.heartbeat)
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     try { this.sock?.end(undefined) } catch { /* best effort */ }
     this.sock = undefined
   }
