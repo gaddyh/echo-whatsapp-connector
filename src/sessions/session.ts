@@ -13,7 +13,13 @@ import type { ConnectionStatus, NormalizedConnectionEvent } from '../events/type
 import { logger } from '../observability/logger.js'
 import { normalizeMessage } from '../baileys/message-normalizer.js'
 import { resolveWaVersion } from '../baileys/version-provider.js'
-import { getGroupSubject, updateConnectionStatus, upsertGroup, upsertIdentity } from '../db/repositories.js'
+import {
+  getGroupSubject,
+  updateConnectionStatus,
+  updateConnectionStatusAndEvent,
+  upsertGroup,
+  upsertIdentity
+} from '../db/repositories.js'
 
 export class Session {
   private sock?: WASocket
@@ -33,8 +39,17 @@ export class Session {
     await this.openSocket()
   }
 
-  private async publishState(status: ConnectionStatus, raw?: string): Promise<void> {
-    await updateConnectionStatus(this.connectionId, status, raw)
+  private async publishState(
+    status: ConnectionStatus,
+    raw?: string,
+    disconnectReason?: string
+  ): Promise<void> {
+    if (env.EVENT_SINK === 'db') {
+      await updateConnectionStatusAndEvent(this.connectionId, status, raw, disconnectReason)
+      return
+    }
+
+    await updateConnectionStatus(this.connectionId, status, raw, disconnectReason)
     const event: NormalizedConnectionEvent = {
       event_type: 'connection_state',
       event_id: `state:${this.connectionId}:${status}:${Date.now()}`,
@@ -160,11 +175,19 @@ export class Session {
     if (this.stopped) return
 
     if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-      await this.publishState('pairing_required', `logged_out:${statusCode}`)
+      await this.publishState(
+        'pairing_required',
+        `logged_out:${statusCode}`,
+        `logged_out:${statusCode}`
+      )
       return
     }
 
-    await this.publishState('degraded', `disconnect:${statusCode || 'unknown'}`)
+    await this.publishState(
+      'degraded',
+      `disconnect:${statusCode || 'unknown'}`,
+      `disconnect:${statusCode || 'unknown'}`
+    )
     const delay = Math.min(
       env.RECONNECT_MAX_DELAY_MS,
       env.RECONNECT_BASE_DELAY_MS * 2 ** Math.min(this.reconnectAttempt++, 8)

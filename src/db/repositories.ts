@@ -1,6 +1,11 @@
 import crypto from 'node:crypto'
 import { pool } from './pool.js'
-import type { ConnectionStatus, NormalizedIdentity } from '../events/types.js'
+import {
+  connectionStateEventId,
+  type ConnectionStatus,
+  type NormalizedConnectionEvent,
+  type NormalizedIdentity
+} from '../events/types.js'
 
 export interface ConnectionRow {
   id: string
@@ -53,6 +58,57 @@ export async function updateConnectionStatus(
       WHERE id=$1`,
     [id, status, rawStatus ?? null, disconnectReason ?? null]
   )
+}
+
+export async function updateConnectionStatusAndEvent(
+  id: string,
+  status: ConnectionStatus,
+  rawStatus?: string,
+  disconnectReason?: string
+): Promise<NormalizedConnectionEvent> {
+  const client = await pool.connect()
+  const timestamp = new Date().toISOString()
+  try {
+    await client.query('BEGIN')
+    const result = await client.query<{ state_version: number }>(
+      `UPDATE whatsapp_connector.connections
+          SET status=$2, raw_status=$3, state_version=state_version+1,
+              updated_at=now(), last_event_at=now(),
+              last_connected_at=CASE WHEN $2='connected' THEN now() ELSE last_connected_at END,
+              last_disconnect_reason=COALESCE($4,last_disconnect_reason),
+              reconnect_count=CASE WHEN $2='reconnecting' THEN reconnect_count+1 ELSE reconnect_count END
+        WHERE id=$1
+        RETURNING state_version`,
+      [id, status, rawStatus ?? null, disconnectReason ?? null]
+    )
+    const stateVersion = result.rows[0]?.state_version
+    if (stateVersion === undefined) throw new Error(`connection not found: ${id}`)
+
+    const event: NormalizedConnectionEvent = {
+      event_type: 'connection_state',
+      event_id: connectionStateEventId(id, stateVersion),
+      provider: 'baileys',
+      connection_id: id,
+      status,
+      provider_raw_status: rawStatus,
+      state_version: stateVersion,
+      timestamp
+    }
+    await client.query(
+      `INSERT INTO whatsapp_connector.event_inbox(
+         event_id, connection_id, event_type, payload)
+       VALUES($1,$2,$3,$4::jsonb)
+       ON CONFLICT(connection_id, event_id) DO NOTHING`,
+      [event.event_id, id, event.event_type, JSON.stringify(event)]
+    )
+    await client.query('COMMIT')
+    return event
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
 }
 
 export async function assignWorker(id: string, workerId: string | null): Promise<void> {
