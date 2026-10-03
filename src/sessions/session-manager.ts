@@ -14,17 +14,48 @@ import {
 import { logger } from '../observability/logger.js'
 import { Session } from './session.js'
 
+const CLAIM_RETRY_DELAY_MS = 10_000
+
+class ClaimUnavailableError extends Error {}
+
 export class SessionManager {
   private readonly sessions = new Map<string, Session>()
+  private readonly restoreTimers = new Map<string, NodeJS.Timeout>()
+
+  private scheduleRestore(connectionId: string, delayMs = CLAIM_RETRY_DELAY_MS): void {
+    if (this.restoreTimers.has(connectionId)) return
+    const timer = setTimeout(() => {
+      this.restoreTimers.delete(connectionId)
+      void this.start(connectionId).catch(err => {
+        if (err instanceof ClaimUnavailableError) {
+          logger.debug({ connection_id: connectionId }, 'assigned connection claim unavailable; retrying')
+          this.scheduleRestore(connectionId)
+          return
+        }
+        logger.warn({ err, connection_id: connectionId }, 'assigned connection was not started')
+      })
+    }, delayMs)
+    this.restoreTimers.set(connectionId, timer)
+  }
 
   async restoreAssigned(): Promise<void> {
     const rows = await listConnections()
     const candidates = rows.filter(r => r.worker_id === env.WORKER_ID && r.status !== 'pairing_required')
     for (let i = 0; i < Math.min(candidates.length, env.MAX_SESSIONS); i++) {
       const row = candidates[i]!
-      setTimeout(() => void this.start(row.id).catch(err => {
-        logger.warn({ err, connection_id: row.id }, 'assigned connection was not started')
-      }), i * env.SESSION_START_STAGGER_MS)
+      const delay = i * env.SESSION_START_STAGGER_MS
+      const timer = setTimeout(() => {
+        this.restoreTimers.delete(row.id)
+        void this.start(row.id).catch(err => {
+          if (err instanceof ClaimUnavailableError) {
+            logger.debug({ connection_id: row.id }, 'assigned connection claim unavailable; retrying')
+            this.scheduleRestore(row.id)
+            return
+          }
+          logger.warn({ err, connection_id: row.id }, 'assigned connection was not started')
+        })
+      }, delay)
+      this.restoreTimers.set(row.id, timer)
     }
   }
 
@@ -42,7 +73,7 @@ export class SessionManager {
     const row = await getConnection(connectionId)
     if (!row) throw new Error('connection not found')
     const claimToken = await claimConnection(connectionId, INSTANCE_ID)
-    if (!claimToken) throw new Error('connection is owned by another worker process')
+    if (!claimToken) throw new ClaimUnavailableError('connection is owned by another worker process')
 
     let session: Session
     const onLostClaim = () => {
@@ -118,6 +149,11 @@ export class SessionManager {
   }
 
   async remove(connectionId: string): Promise<void> {
+    const restoreTimer = this.restoreTimers.get(connectionId)
+    if (restoreTimer) {
+      clearTimeout(restoreTimer)
+      this.restoreTimers.delete(connectionId)
+    }
     const session = this.sessions.get(connectionId)
     if (session) {
       await session.stop()
@@ -129,6 +165,8 @@ export class SessionManager {
 
   async shutdown(): Promise<void> {
     logger.info({ sessions: this.sessions.size }, 'stopping sessions')
+    for (const timer of this.restoreTimers.values()) clearTimeout(timer)
+    this.restoreTimers.clear()
     const sessions = [...this.sessions.values()]
     await Promise.allSettled(sessions.map(async session => {
       await session.stop()
