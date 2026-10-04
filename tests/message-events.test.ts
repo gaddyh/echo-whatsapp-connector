@@ -71,7 +71,25 @@ describe('normalized message events', () => {
       kind: 'audio',
       media_mime_type: 'audio/ogg; codecs=opus'
     })
-    expect(event?.media_reference).toBe('baileys:connection-id:audio-id')
+    expect(event).not.toHaveProperty('media_reference')
     expect(event).not.toHaveProperty('media_download_url')
+  })
+
+  it('emits a media reference only when the media payload can be downloaded', () => {
+    const event = normalizeMessage('connection-id', {
+      key: {
+        id: 'audio-id',
+        remoteJid: '15551234567@s.whatsapp.net',
+        fromMe: false
+      },
+      message: {
+        audioMessage: {
+          mimetype: 'audio/ogg',
+          mediaKey: Buffer.from('media-key')
+        }
+      }
+    } as any)
+
+    expect(event?.media_reference).toBe('baileys:connection-id:audio-id')
   })
 })
