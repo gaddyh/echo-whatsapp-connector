@@ -46,6 +46,10 @@ export function normalizeMessage(connectionId: string, msg: WAMessage): Normaliz
 
   const raw = unwrap(msg.message)
   const info = classify(raw)
+  const mediaContent = info.kind !== 'text' && info.kind !== 'other' && info.kind !== 'reaction'
+    ? raw?.[`${info.kind}Message`]
+    : undefined
+  const hasMediaKey = mediaContent?.mediaKey != null
   const isGroup = chatId.endsWith('@g.us')
   const keyAny = msg.key as any
   const participant = isGroup ? keyAny.participant : (msg.key.fromMe ? undefined : chatId)
@@ -73,7 +77,7 @@ export function normalizeMessage(connectionId: string, msg: WAMessage): Normaliz
     quoted_message_id: info.quoted,
     media_mime_type: info.mime,
     media_file_name: info.fileName,
-    ...(info.kind !== 'text' && info.kind !== 'other'
+    ...(hasMediaKey
       ? { media_reference: mediaReference(connectionId, id) }
       : {})
   }

@@ -315,6 +315,9 @@ export class Session {
       .find(type => raw[`${type}Message`] !== undefined)
     if (!mediaType) throw new Error('message does not contain downloadable media')
     const content = raw[`${mediaType}Message`]
+    if (!content || content.mediaKey == null) {
+      throw new Error('message media payload is incomplete')
+    }
     const stream = await downloadContentFromMessage(content, mediaType as any)
     const chunks: Buffer[] = []
     let size = 0
