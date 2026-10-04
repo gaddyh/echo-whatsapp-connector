@@ -141,6 +141,11 @@ export class SessionManager {
     return session.sendText(chatId, text)
   }
 
+  async downloadMedia(connectionId: string, reference: string): Promise<{ bytes: Buffer; mimeType?: string; fileName?: string }> {
+    const session = await this.start(connectionId)
+    return session.downloadMedia(reference)
+  }
+
   async unpair(connectionId: string): Promise<void> {
     const session = await this.start(connectionId)
     await session.unpair()

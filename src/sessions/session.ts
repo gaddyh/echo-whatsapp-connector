@@ -3,7 +3,9 @@ import {
   DisconnectReason,
   makeCacheableSignalKeyStore,
   makeWASocket,
-  type WASocket
+  downloadContentFromMessage,
+  type WASocket,
+  type WAMessage
 } from '@whiskeysockets/baileys'
 import type { Pool } from 'pg'
 import { createPostgresAuthState } from '../auth/postgres-auth-state.js'
@@ -13,10 +15,13 @@ import { eventSink } from '../events/sink.js'
 import type { ConnectionStatus, NormalizedConnectionEvent } from '../events/types.js'
 import { logger } from '../observability/logger.js'
 import { normalizeMessage } from '../baileys/message-normalizer.js'
+import { signedMediaUrl } from '../media/signed-urls.js'
 import { resolveWaVersion } from '../baileys/version-provider.js'
 import {
   getGroupSubject,
+  getMediaBlob,
   LostClaimError,
+  saveMediaBlob,
   renewClaim,
   updateConnectionStatus,
   updateConnectionStatusAndEvent,
@@ -34,6 +39,7 @@ export class Session {
   private heartbeat?: NodeJS.Timeout
   private reconnectTimer?: NodeJS.Timeout
   private apiSentMessageIds = new Set<string>()
+  private readonly mediaMessages = new Map<string, WAMessage>()
 
   constructor(
     readonly connectionId: string,
@@ -88,6 +94,7 @@ export class Session {
 
       await updateConnectionStatus(this.connectionId, this.claimToken, status, raw, disconnectReason)
       const event: NormalizedConnectionEvent = {
+        schema_version: 1,
         event_type: 'connection_state',
         event_id: `state:${this.connectionId}:${status}:${Date.now()}`,
         provider: 'baileys',
@@ -159,6 +166,29 @@ export class Session {
       for (const msg of messages) {
         const event = normalizeMessage(this.connectionId, msg)
         if (!event) continue
+        if (event.media_reference) {
+          this.mediaMessages.set(event.media_reference, msg)
+          if (env.DOWNLOAD_MEDIA) {
+            try {
+              const media = await this.downloadMediaMessage(msg)
+              await saveMediaBlob(
+                this.connectionId,
+                this.claimToken,
+                event.media_reference,
+                media.bytes,
+                media.mimeType,
+                media.fileName
+              )
+            } catch (err) {
+              if (err instanceof LostClaimError) this.loseClaim(err)
+              else logger.warn({ err, connection_id: this.connectionId }, 'media persistence failed')
+            }
+          }
+          event.media_download_url = signedMediaUrl(
+            this.connectionId,
+            event.media_reference
+          )
+        }
         if (event.direction === 'outbound' && this.apiSentMessageIds.has(event.provider_message_id)) {
           event.source = 'api'
           this.apiSentMessageIds.delete(event.provider_message_id)
@@ -184,7 +214,7 @@ export class Session {
             else logger.warn({ err, connection_id: this.connectionId, chat_id: event.chat_id }, 'group subject lookup failed')
           }
         }
-        try { await eventSink.publish(event) }
+        try { await eventSink.publish(event, this.claimToken) }
         catch (err) { logger.error({ err, connection_id: this.connectionId }, 'event publish failed') }
       }
     })
@@ -266,6 +296,39 @@ export class Session {
   async requestPairingCode(phoneNumber: string): Promise<string> {
     if (!this.sock) await this.openSocket()
     return await this.sock!.requestPairingCode(phoneNumber.replace(/\D/g, ''))
+  }
+
+  async downloadMedia(reference: string): Promise<{ bytes: Buffer; mimeType?: string; fileName?: string }> {
+    const stored = await getMediaBlob(this.connectionId, reference)
+    if (stored) {
+      return { bytes: stored.content, mimeType: stored.mimeType, fileName: stored.fileName }
+    }
+    const message = this.mediaMessages.get(reference)
+    if (!message) throw new Error('media reference is unavailable')
+    return this.downloadMediaMessage(message)
+  }
+
+  private async downloadMediaMessage(msg: WAMessage): Promise<{ bytes: Buffer; mimeType?: string; fileName?: string }> {
+    if (!msg.message) throw new Error('message does not contain media')
+    const raw = msg.message as Record<string, any>
+    const mediaType = ['audio', 'image', 'video', 'document']
+      .find(type => raw[`${type}Message`] !== undefined)
+    if (!mediaType) throw new Error('message does not contain downloadable media')
+    const content = raw[`${mediaType}Message`]
+    const stream = await downloadContentFromMessage(content, mediaType as any)
+    const chunks: Buffer[] = []
+    let size = 0
+    for await (const chunk of stream) {
+      const buffer = Buffer.from(chunk)
+      size += buffer.length
+      if (size > env.MAX_MEDIA_BYTES) throw new Error('media exceeds configured size limit')
+      chunks.push(buffer)
+    }
+    return {
+      bytes: Buffer.concat(chunks),
+      mimeType: content.mimetype,
+      fileName: content.fileName
+    }
   }
 
   async sendText(chatId: string, text: string): Promise<string> {

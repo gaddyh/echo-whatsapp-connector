@@ -18,11 +18,14 @@ const schema = z.object({
   WA_WEB_VERSION_OVERRIDE: z.string().optional().default(''),
   BAILEYS_BROWSER_NAME: z.string().default('Echo Guard'),
   BAILEYS_BROWSER_PLATFORM: z.string().default('Chrome'),
-  DOWNLOAD_MEDIA: z.coerce.boolean().default(false),
+  DOWNLOAD_MEDIA: z.coerce.boolean().default(true),
   MAX_MEDIA_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
   EVENT_SINK: z.enum(['db', 'http']).default('db'),
   EVENT_WEBHOOK_URL: z.string().optional().default(''),
-  EVENT_WEBHOOK_TOKEN: z.string().optional().default('')
+  EVENT_WEBHOOK_TOKEN: z.string().optional().default(''),
+  MEDIA_BASE_URL: z.string().url().default('http://localhost:8080'),
+  MEDIA_SIGNING_SECRET: z.string().optional().default(''),
+  MEDIA_URL_TTL_SECONDS: z.coerce.number().int().positive().default(300)
 })
 
 export type Env = z.infer<typeof schema>

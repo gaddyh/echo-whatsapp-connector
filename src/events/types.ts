@@ -25,6 +25,7 @@ export interface NormalizedIdentity {
 }
 
 export interface NormalizedMessageEvent {
+  schema_version: 1
   event_type: 'message'
   event_id: string
   provider: 'baileys'
@@ -42,9 +43,12 @@ export interface NormalizedMessageEvent {
   quoted_message_id?: string
   media_mime_type?: string
   media_file_name?: string
+  media_reference?: string
+  media_download_url?: string
 }
 
 export interface NormalizedConnectionEvent {
+  schema_version: 1
   event_type: 'connection_state'
   event_id: string
   provider: 'baileys'
