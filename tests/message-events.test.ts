@@ -75,6 +75,28 @@ describe('normalized message events', () => {
     expect(event).not.toHaveProperty('media_download_url')
   })
 
+  it('unwraps wrapped media before emitting a media reference', () => {
+    const event = normalizeMessage('connection-id', {
+      key: {
+        id: 'wrapped-audio-id',
+        remoteJid: '15551234567@s.whatsapp.net',
+        fromMe: false
+      },
+      message: {
+        ephemeralMessage: {
+          message: {
+            audioMessage: {
+              mimetype: 'audio/ogg',
+              mediaKey: Buffer.from('media-key')
+            }
+          }
+        }
+      }
+    } as any)
+
+    expect(event?.media_reference).toBe('baileys:connection-id:wrapped-audio-id')
+  })
+
   it('emits a media reference only when the media payload can be downloaded', () => {
     const event = normalizeMessage('connection-id', {
       key: {

@@ -14,7 +14,7 @@ import { INSTANCE_ID } from '../config/process-identity.js'
 import { eventSink } from '../events/sink.js'
 import type { ConnectionStatus, NormalizedConnectionEvent } from '../events/types.js'
 import { logger } from '../observability/logger.js'
-import { normalizeMessage } from '../baileys/message-normalizer.js'
+import { normalizeMessage, unwrapMessage } from '../baileys/message-normalizer.js'
 import { signedMediaUrl } from '../media/signed-urls.js'
 import { resolveWaVersion } from '../baileys/version-provider.js'
 import {
@@ -310,7 +310,7 @@ export class Session {
 
   private async downloadMediaMessage(msg: WAMessage): Promise<{ bytes: Buffer; mimeType?: string; fileName?: string }> {
     if (!msg.message) throw new Error('message does not contain media')
-    const raw = msg.message as Record<string, any>
+    const raw = unwrapMessage(msg.message) as Record<string, any>
     const mediaType = ['audio', 'image', 'video', 'document']
       .find(type => raw[`${type}Message`] !== undefined)
     if (!mediaType) throw new Error('message does not contain downloadable media')
