@@ -245,35 +245,88 @@ export async function deleteConnectionRow(id: string): Promise<void> {
 }
 
 export async function upsertIdentity(connectionId: string, token: string, identity: NormalizedIdentity): Promise<void> {
-  const result = await pool.query(
-    `INSERT INTO whatsapp_connector.identities(
-       connection_id, canonical_id, lid, phone_jid, phone_number, push_name, saved_name)
-     SELECT $1,$2,$3,$4,$5,$6,NULL
-      WHERE EXISTS (
-        SELECT 1 FROM whatsapp_connector.connections
-         WHERE id=$1 AND ${claimPredicate(7)}
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const claim = await client.query(
+      `SELECT 1 FROM whatsapp_connector.connections
+        WHERE id=$1 AND ${claimPredicate(2)}
+        FOR UPDATE`,
+      [connectionId, token]
+    )
+    if (claim.rowCount !== 1) throw new LostClaimError(connectionId)
+
+    const existing = await client.query<{
+      canonical_id: string
+      phone_jid: string | null
+      saved_name: string | null
+      push_name: string | null
+    }>(
+      `SELECT canonical_id, phone_jid, saved_name, push_name
+         FROM whatsapp_connector.identities
+        WHERE connection_id=$1
+          AND (canonical_id=$2 OR ($3::text IS NOT NULL AND phone_jid=$3))
+        FOR UPDATE`,
+      [connectionId, identity.canonical_id, identity.phone_jid ?? null]
+    )
+    const canonical = existing.rows.find(row => row.canonical_id === identity.canonical_id)
+    const phone = identity.phone_jid
+      ? existing.rows.find(row => row.phone_jid === identity.phone_jid)
+      : undefined
+
+    if (canonical && phone && canonical.canonical_id !== phone.canonical_id) {
+      await client.query(
+        `DELETE FROM whatsapp_connector.identities
+          WHERE connection_id=$1 AND canonical_id=$2`,
+        [connectionId, phone.canonical_id]
       )
-     ON CONFLICT(connection_id, canonical_id) DO UPDATE SET
-       lid=COALESCE(EXCLUDED.lid, whatsapp_connector.identities.lid),
-       phone_jid=COALESCE(EXCLUDED.phone_jid, whatsapp_connector.identities.phone_jid),
-       phone_number=COALESCE(EXCLUDED.phone_number, whatsapp_connector.identities.phone_number),
-       push_name=COALESCE(EXCLUDED.push_name, whatsapp_connector.identities.push_name),
-       updated_at=now()
-      WHERE EXISTS (
-        SELECT 1 FROM whatsapp_connector.connections
-         WHERE id=$1 AND ${claimPredicate(7)}
-      )`,
-    [
-      connectionId,
-      identity.canonical_id,
-      identity.lid ?? null,
-      identity.phone_jid ?? null,
-      identity.phone_number ?? null,
-      identity.display_name ?? null,
-      token
-    ]
-  )
-  if (result.rowCount !== 1) throw new LostClaimError(connectionId)
+    }
+
+    const target = canonical ?? phone
+    if (target) {
+      await client.query(
+        `UPDATE whatsapp_connector.identities
+            SET canonical_id=$2,
+                lid=COALESCE($3,lid),
+                phone_jid=COALESCE($4,phone_jid),
+                phone_number=COALESCE($5,phone_number),
+                push_name=COALESCE($6,push_name),
+                saved_name=COALESCE(saved_name,$7),
+                updated_at=now()
+          WHERE connection_id=$1 AND canonical_id=$8`,
+        [
+          connectionId,
+          identity.canonical_id,
+          identity.lid ?? null,
+          identity.phone_jid ?? null,
+          identity.phone_number ?? null,
+          identity.display_name ?? null,
+          target.saved_name ?? target.push_name,
+          target.canonical_id
+        ]
+      )
+    } else {
+      await client.query(
+        `INSERT INTO whatsapp_connector.identities(
+           connection_id, canonical_id, lid, phone_jid, phone_number, push_name, saved_name)
+         VALUES($1,$2,$3,$4,$5,$6,NULL)`,
+        [
+          connectionId,
+          identity.canonical_id,
+          identity.lid ?? null,
+          identity.phone_jid ?? null,
+          identity.phone_number ?? null,
+          identity.display_name ?? null
+        ]
+      )
+    }
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
 }
 
 export async function upsertGroup(

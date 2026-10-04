@@ -106,6 +106,13 @@ describe('connection claims', () => {
       state_version: 4
     })
     expect(typeof stateEvent.state_version).toBe('number')
+    clientQuery.mockReset()
+    clientQuery
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
     await upsertIdentity('id', 'token', { canonical_id: 'alice' })
     await upsertGroup('id', 'token', 'group', 'Family')
 
@@ -130,7 +137,10 @@ describe('connection claims', () => {
       .mockResolvedValueOnce({ rows: [] })
     await expect(updateConnectionStatusAndEvent('id', 'stale-token', 'connected')).rejects.toBeInstanceOf(LostClaimError)
 
-    query.mockResolvedValueOnce({ rowCount: 0 })
+    clientQuery.mockReset()
+    clientQuery
+      .mockResolvedValueOnce({ rowCount: 0 })
+      .mockResolvedValueOnce({})
     await expect(upsertIdentity('id', 'stale-token', { canonical_id: 'alice' })).rejects.toBeInstanceOf(LostClaimError)
     query.mockResolvedValueOnce({ rowCount: 0 })
     await expect(upsertGroup('id', 'stale-token', 'group')).rejects.toBeInstanceOf(LostClaimError)
