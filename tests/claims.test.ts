@@ -97,13 +97,15 @@ describe('connection claims', () => {
 
     clientQuery
       .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ rows: [{ state_version: 4 }] })
+      .mockResolvedValueOnce({ rows: [{ state_version: '4' }] })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
-    await expect(updateConnectionStatusAndEvent('id', 'token', 'connected', 'open')).resolves.toMatchObject({
+    const stateEvent = await updateConnectionStatusAndEvent('id', 'token', 'connected', 'open')
+    expect(stateEvent).toMatchObject({
       event_type: 'connection_state',
       state_version: 4
     })
+    expect(typeof stateEvent.state_version).toBe('number')
     await upsertIdentity('id', 'token', { canonical_id: 'alice' })
     await upsertGroup('id', 'token', 'group', 'Family')
 
