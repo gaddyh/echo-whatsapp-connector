@@ -1,6 +1,7 @@
 import type { WAMessage } from '@whiskeysockets/baileys'
 import type { MessageKind, NormalizedMessageEvent } from '../events/types.js'
 import { normalizeIdentity } from './identity.js'
+import { mediaReference } from '../media/reference.js'
 
 function unwrap(message: any): any {
   let m = message
@@ -53,6 +54,7 @@ export function normalizeMessage(connectionId: string, msg: WAMessage): Normaliz
   const timestampSeconds = Number(msg.messageTimestamp ?? Math.floor(Date.now() / 1000))
 
   return {
+    schema_version: 1,
     event_type: 'message',
     event_id: `message:${connectionId}:${id}:${msg.key.fromMe ? 'out' : 'in'}`,
     provider: 'baileys',
@@ -70,6 +72,9 @@ export function normalizeMessage(connectionId: string, msg: WAMessage): Normaliz
     sender,
     quoted_message_id: info.quoted,
     media_mime_type: info.mime,
-    media_file_name: info.fileName
+    media_file_name: info.fileName,
+    ...(info.kind !== 'text' && info.kind !== 'other'
+      ? { media_reference: mediaReference(connectionId, id) }
+      : {})
   }
 }

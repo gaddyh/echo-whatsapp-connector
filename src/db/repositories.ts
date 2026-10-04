@@ -7,6 +7,50 @@ import {
   type NormalizedIdentity
 } from '../events/types.js'
 
+export async function saveMediaBlob(
+  connectionId: string,
+  claimToken: string,
+  reference: string,
+  content: Buffer,
+  mimeType?: string,
+  fileName?: string
+): Promise<void> {
+  const result = await pool.query(
+    `INSERT INTO whatsapp_connector.media_blobs(
+       connection_id, media_reference, mime_type, file_name, content
+     )
+     SELECT $1, $2, $3, $4, $5
+      WHERE EXISTS (
+        SELECT 1 FROM whatsapp_connector.connections
+         WHERE id=$1 AND claim_token=$6::uuid AND claim_expires_at > now()
+      )
+     ON CONFLICT(connection_id, media_reference) DO UPDATE
+       SET mime_type=EXCLUDED.mime_type, file_name=EXCLUDED.file_name,
+           content=EXCLUDED.content`,
+    [connectionId, reference, mimeType ?? null, fileName ?? null, content, claimToken]
+  )
+  if (result.rowCount !== 1) throw new LostClaimError(connectionId)
+}
+
+export async function getMediaBlob(
+  connectionId: string,
+  reference: string
+): Promise<{ content: Buffer; mimeType?: string; fileName?: string } | null> {
+  const result = await pool.query(
+    `SELECT content, mime_type, file_name
+       FROM whatsapp_connector.media_blobs
+      WHERE connection_id=$1 AND media_reference=$2`,
+    [connectionId, reference]
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  return {
+    content: row.content as Buffer,
+    mimeType: row.mime_type ?? undefined,
+    fileName: row.file_name ?? undefined
+  }
+}
+
 export interface ConnectionRow {
   id: string
   status: ConnectionStatus
@@ -147,6 +191,7 @@ export async function updateConnectionStatusAndEvent(
     if (stateVersion === undefined) throw new LostClaimError(id)
 
     const event: NormalizedConnectionEvent = {
+      schema_version: 1,
       event_type: 'connection_state',
       event_id: connectionStateEventId(id, stateVersion),
       provider: 'baileys',

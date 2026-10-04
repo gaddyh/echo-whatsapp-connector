@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { env } from '../config/env.js'
 import { listConnections, updateConnectionSettings } from '../db/repositories.js'
 import { sessionManager } from '../sessions/session-manager.js'
+import { signedMediaUrl, verifyMediaSignature } from '../media/signed-urls.js'
 
 const createSchema = z.object({
   phone_number: z.string().optional(),
@@ -15,13 +16,39 @@ const createSchema = z.object({
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('onRequest', async (req, reply) => {
-    if (req.url === '/health') return
+    if (req.url === '/health' || req.url.startsWith('/media/')) return
     if (req.headers.authorization !== `Bearer ${env.INTERNAL_API_TOKEN}`) {
       return reply.code(401).send({ error: 'unauthorized' })
     }
   })
 
   app.get('/health', async () => ({ status: 'ok', worker_id: env.WORKER_ID }))
+
+  app.get('/media/:connectionId/:reference', async (req, reply) => {
+    const { connectionId, reference } = req.params as { connectionId: string; reference: string }
+    const query = z.object({
+      expires: z.coerce.number().int(),
+      signature: z.string().min(1)
+    }).parse(req.query)
+    if (!verifyMediaSignature(connectionId, reference, query.expires, query.signature)) {
+      return reply.code(403).send({ error: 'invalid or expired media URL' })
+    }
+    try {
+      const media = await sessionManager.downloadMedia(connectionId, reference)
+      if (media.mimeType) reply.type(media.mimeType)
+      if (media.fileName) reply.header('content-disposition', `inline; filename="${media.fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}"`)
+      return reply.send(media.bytes)
+    } catch (err) {
+      req.log.warn({ err, connection_id: connectionId, reference }, 'media download failed')
+      return reply.code(404).send({ error: 'media unavailable' })
+    }
+  })
+
+  app.get('/connections/:id/media-url', async req => {
+    const { id } = req.params as { id: string }
+    const query = z.object({ reference: z.string().min(1) }).parse(req.query)
+    return { media_download_url: signedMediaUrl(id, query.reference) }
+  })
 
   app.post('/connections', async (req, reply) => {
     const body = createSchema.parse(req.body ?? {})
