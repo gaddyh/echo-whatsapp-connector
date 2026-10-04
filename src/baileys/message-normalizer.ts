@@ -3,7 +3,7 @@ import type { MessageKind, NormalizedMessageEvent } from '../events/types.js'
 import { normalizeIdentity } from './identity.js'
 import { mediaReference } from '../media/reference.js'
 
-function unwrap(message: any): any {
+export function unwrapMessage(message: any): any {
   let m = message
   for (;;) {
     const next = m?.ephemeralMessage?.message
@@ -44,7 +44,7 @@ export function normalizeMessage(connectionId: string, msg: WAMessage): Normaliz
   const chatId = msg.key.remoteJid
   if (!id || !chatId) return null
 
-  const raw = unwrap(msg.message)
+  const raw = unwrapMessage(msg.message)
   const info = classify(raw)
   const mediaContent = info.kind !== 'text' && info.kind !== 'other' && info.kind !== 'reaction'
     ? raw?.[`${info.kind}Message`]
