@@ -187,8 +187,12 @@ export async function updateConnectionStatusAndEvent(
         RETURNING state_version`,
       [id, status, rawStatus ?? null, disconnectReason ?? null, token]
     )
-    const stateVersion = result.rows[0]?.state_version
-    if (stateVersion === undefined) throw new LostClaimError(id)
+    const rawStateVersion = result.rows[0]?.state_version
+    if (rawStateVersion === undefined) throw new LostClaimError(id)
+    const stateVersion = Number(rawStateVersion)
+    if (!Number.isSafeInteger(stateVersion)) {
+      throw new Error(`invalid state version for connection ${id}`)
+    }
 
     const event: NormalizedConnectionEvent = {
       schema_version: 1,
