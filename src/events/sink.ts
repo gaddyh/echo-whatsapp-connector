@@ -3,11 +3,13 @@ import { pool } from '../db/pool.js'
 import type { NormalizedEvent } from './types.js'
 import { LostClaimError } from '../db/repositories.js'
 
-export interface EventSink { publish(event: NormalizedEvent, claimToken?: string): Promise<void> }
+export interface EventSink {
+  publish(event: NormalizedEvent, claimToken?: string, isCurrent?: () => boolean): Promise<void>
+}
 
 class DbEventSink implements EventSink {
-  async publish(event: NormalizedEvent, claimToken?: string): Promise<void> {
-    if (!claimToken) throw new LostClaimError(event.connection_id)
+  async publish(event: NormalizedEvent, claimToken?: string, isCurrent?: () => boolean): Promise<void> {
+    if (!claimToken || (isCurrent && !isCurrent())) throw new LostClaimError(event.connection_id)
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
@@ -18,6 +20,7 @@ class DbEventSink implements EventSink {
         [event.connection_id, claimToken]
       )
       if (claim.rowCount !== 1) throw new LostClaimError(event.connection_id)
+      if (isCurrent && !isCurrent()) throw new LostClaimError(event.connection_id)
       const providerMessageId = event.event_type === 'message' ? event.provider_message_id : null
       await client.query(
         `INSERT INTO whatsapp_connector.event_inbox(event_id, connection_id, event_type, provider_message_id, payload)
@@ -36,7 +39,8 @@ class DbEventSink implements EventSink {
 }
 
 class HttpEventSink implements EventSink {
-  async publish(event: NormalizedEvent): Promise<void> {
+  async publish(event: NormalizedEvent, _claimToken?: string, isCurrent?: () => boolean): Promise<void> {
+    if (isCurrent && !isCurrent()) throw new LostClaimError(event.connection_id)
     if (!env.EVENT_WEBHOOK_URL) throw new Error('EVENT_WEBHOOK_URL is required for EVENT_SINK=http')
     const res = await fetch(env.EVENT_WEBHOOK_URL, {
       method: 'POST',

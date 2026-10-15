@@ -493,7 +493,9 @@ GET /health
 
 A healthy HTTP service does **not** necessarily mean WhatsApp sessions are healthy.
 
-Also inspect connection states.
+A database transport failure during lease renewal is treated as `claim_unverified`: the connector stops the socket, keeps auth, and recovers only after acquiring a fresh fenced claim. It must not become `pairing_required`.
+
+Also inspect connection states, including `persistent_status`, `runtime_state`, `lease_valid`, `session_present`, and `socket_present`. `connected` is healthy only when the lease and live session are both valid.
 
 Useful statuses:
 

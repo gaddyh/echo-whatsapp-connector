@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { env } from '../config/env.js'
-import { listConnections, updateConnectionSettings } from '../db/repositories.js'
+import { updateConnectionSettings } from '../db/repositories.js'
 import { sessionManager } from '../sessions/session-manager.js'
 import { signedMediaUrl, verifyMediaSignature } from '../media/signed-urls.js'
 
@@ -56,15 +56,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(created)
   })
 
-  app.get('/connections', async () => {
-    const rows = await listConnections()
-    return rows.map(r => ({
-      connection_id: r.id,
-      status: r.status,
-      provider_raw_status: r.raw_status,
-      worker_id: r.worker_id
-    }))
-  })
+  app.get('/connections', async () => sessionManager.listStatus())
 
   app.put('/connections/:id/config', async (req, reply) => {
     const { id } = req.params as { id: string }
