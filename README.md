@@ -175,7 +175,13 @@ whatsapp_connector.event_inbox
 
 Rows are unique on `(connection_id, event_id)` for idempotency. Echo Guard can consume unprocessed rows and set `processed_at`.
 
-Optional (`EVENT_SINK=http`): connector posts the same normalized JSON to `EVENT_WEBHOOK_URL` with optional bearer auth.
+Optional (`EVENT_SINK=http`): connector posts the same normalized JSON to `EVENT_WEBHOOK_URL` with optional bearer auth. HTTP delivery is guarded by the local session generation, but cannot provide the same atomic fencing guarantee as the database sink.
+
+## Lease recovery and runtime health
+
+The connector renews each 30-second connection lease every 10 seconds. A renewal timeout or database transport error makes ownership unverified: the Baileys socket is stopped immediately, credentials are retained, and the `SessionManager` schedules recovery with bounded exponential backoff and jitter. Recovery must acquire a valid fencing token before opening a new socket; it never maps a database failure to `pairing_required`.
+
+Connection status responses include persisted provider status separately from runtime health. A connection is only runtime-healthy when its session and socket are active, the lease is valid, and recovery is not pending. During a database outage, runtime state is `claim_unverified` rather than an inferred expired lease.
 
 ## API
 
