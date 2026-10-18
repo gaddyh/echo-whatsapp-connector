@@ -55,6 +55,7 @@ export interface NormalizedConnectionEvent {
   connection_id: string
   status: ConnectionStatus
   provider_raw_status?: string
+  runtime_state?: string
   state_version?: number
   timestamp: string
 }

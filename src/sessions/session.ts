@@ -101,6 +101,13 @@ export class Session {
         connection_id: this.connectionId,
         status,
         provider_raw_status: raw,
+        runtime_state: status === 'connected'
+          ? 'healthy'
+          : status === 'pairing_required'
+            ? 'stopped'
+            : status === 'degraded'
+              ? 'degraded'
+              : 'starting',
         timestamp: new Date().toISOString()
       }
       await eventSink.publish(event, this.claimToken)
