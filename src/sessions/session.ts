@@ -32,6 +32,8 @@ import {
   updateConnectionPhone
 } from '../db/repositories.js'
 
+const RECONNECT_JITTER_RATIO = 0.25
+
 export type SessionRuntimeState = 'starting' | 'healthy' | 'degraded' | 'claim_unverified' | 'stopped'
 export type SessionLossReason = 'claim_lost' | 'claim_unverified'
 
@@ -339,6 +341,10 @@ export class Session {
     if (!this.isActive(generation)) return
 
     if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer)
+        this.reconnectTimer = undefined
+      }
       await this.publishState(
         'pairing_required',
         `logged_out:${statusCode}`,
@@ -355,10 +361,11 @@ export class Session {
       `disconnect:${statusCode || 'unknown'}`,
       generation
     )
-    const delay = Math.min(
+    const base = Math.min(
       env.RECONNECT_MAX_DELAY_MS,
       env.RECONNECT_BASE_DELAY_MS * 2 ** Math.min(this.reconnectAttempt++, 8)
     )
+    const delay = Math.floor(base * (1 - RECONNECT_JITTER_RATIO * Math.random()))
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined
       if (!this.stopped && !this.lostClaim) void this.openSocket().catch(err => {
