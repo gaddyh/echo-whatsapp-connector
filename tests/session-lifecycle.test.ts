@@ -4,6 +4,7 @@ const renewClaim = vi.fn()
 const makeWASocket = vi.fn()
 const updateConnectionStatusAndEvent = vi.fn()
 const updateConnectionStatus = vi.fn()
+const updateConnectionPhone = vi.fn()
 const createPostgresAuthState = vi.fn()
 
 vi.mock('@whiskeysockets/baileys', () => ({
@@ -48,6 +49,7 @@ vi.mock('../src/db/repositories.js', () => ({
   renewClaim,
   updateConnectionStatus,
   updateConnectionStatusAndEvent,
+  updateConnectionPhone,
   upsertGroup: vi.fn(),
   upsertIdentity: vi.fn()
 }))
@@ -67,10 +69,12 @@ describe('Session claim lifecycle', () => {
     vi.resetAllMocks()
     updateConnectionStatusAndEvent.mockResolvedValue({})
     updateConnectionStatus.mockResolvedValue(undefined)
+    renewClaim.mockResolvedValue(true)
     createPostgresAuthState.mockResolvedValue({ state: { creds: {}, keys: {} }, saveCreds: vi.fn(), clear: vi.fn() })
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     vi.useRealTimers()
   })
 
@@ -107,5 +111,93 @@ describe('Session claim lifecycle', () => {
     expect(fixture.socket.end).toHaveBeenCalledOnce()
     expect(onLostClaim).toHaveBeenCalledOnce()
     expect(onLostClaim.mock.calls[0]?.[0]).toBe('claim_lost')
+  })
+
+  it('uses bounded jitter and resets reconnect attempts after a successful connection', async () => {
+    const fixtures = [socketFixture(), socketFixture(), socketFixture()]
+    let fixtureIndex = 0
+    makeWASocket.mockImplementation(() => fixtures[fixtureIndex++]!.socket)
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const onLostClaim = vi.fn()
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', onLostClaim)
+
+    await session.start()
+    await fixtures[0]!.handlers.get('connection.update')!({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 500 } } }
+    })
+
+    expect(makeWASocket).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1_749)
+    expect(makeWASocket).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(makeWASocket).toHaveBeenCalledTimes(2)
+
+    await fixtures[1]!.handlers.get('connection.update')!({ connection: 'open' })
+    await fixtures[1]!.handlers.get('connection.update')!({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 500 } } }
+    })
+    await vi.advanceTimersByTimeAsync(1_750)
+
+    expect(makeWASocket).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not reconnect after a logged-out disconnect clears a pending timer', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const onLostClaim = vi.fn()
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', onLostClaim)
+
+    await session.start()
+    const connectionUpdate = fixture.handlers.get('connection.update')!
+    await connectionUpdate({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 500 } } }
+    })
+    await connectionUpdate({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 401 } } }
+    })
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(makeWASocket).toHaveBeenCalledOnce()
+    expect(updateConnectionStatusAndEvent).toHaveBeenLastCalledWith(
+      'connection-id',
+      'claim-token',
+      'pairing_required',
+      'logged_out:401',
+      'logged_out:401'
+    )
+  })
+
+  it('keeps capped reconnect delays below the maximum', async () => {
+    const fixtures = Array.from({ length: 7 }, () => socketFixture())
+    const queue = [...fixtures]
+    makeWASocket.mockImplementation(() => queue.shift()!.socket)
+    vi.spyOn(Math, 'random').mockReturnValue(1)
+    const onLostClaim = vi.fn()
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', onLostClaim)
+
+    await session.start()
+    let currentIndex = 0
+    let current = fixtures[currentIndex]!
+    const expectedDelays = [1_500, 3_000, 6_000, 12_000, 24_000, 45_000]
+    for (const delay of expectedDelays) {
+      await current.handlers.get('connection.update')!({
+        connection: 'close',
+        lastDisconnect: { error: { output: { statusCode: 500 } } }
+      })
+      const callsBefore = makeWASocket.mock.calls.length
+      await vi.advanceTimersByTimeAsync(delay - 1)
+      expect(makeWASocket).toHaveBeenCalledTimes(callsBefore)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(makeWASocket).toHaveBeenCalledTimes(callsBefore + 1)
+      current = fixtures[++currentIndex]!
+    }
   })
 })
