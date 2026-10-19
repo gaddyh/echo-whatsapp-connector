@@ -15,6 +15,7 @@ import { eventSink } from '../events/sink.js'
 import type { ConnectionStatus, NormalizedConnectionEvent } from '../events/types.js'
 import { logger } from '../observability/logger.js'
 import { normalizeMessage, unwrapMessage } from '../baileys/message-normalizer.js'
+import { phoneFromJid } from '../baileys/identity.js'
 import { signedMediaUrl } from '../media/signed-urls.js'
 import { resolveWaVersion } from '../baileys/version-provider.js'
 import {
@@ -27,7 +28,8 @@ import {
   updateConnectionStatus,
   updateConnectionStatusAndEvent,
   upsertGroup,
-  upsertIdentity
+  upsertIdentity,
+  updateConnectionPhone
 } from '../db/repositories.js'
 
 export type SessionRuntimeState = 'starting' | 'healthy' | 'degraded' | 'claim_unverified' | 'stopped'
@@ -47,6 +49,7 @@ export class Session {
   private runtime: SessionRuntimeState = 'starting'
   private apiSentMessageIds = new Set<string>()
   private readonly mediaMessages = new Map<string, WAMessage>()
+  private accountPhoneNumber?: string
 
   constructor(
     readonly connectionId: string,
@@ -60,6 +63,7 @@ export class Session {
   get socket(): WASocket | undefined { return this.sock }
   get latestQr(): string | undefined { return this.qr }
   get capability(): string { return this.claimToken }
+  get authenticatedPhoneNumber(): string | undefined { return this.accountPhoneNumber }
   get runtimeState(): SessionRuntimeState { return this.runtime }
 
   private isActive(generation = this.generation): boolean {
@@ -184,6 +188,35 @@ export class Session {
       if (update.connection === 'open') {
         this.qr = undefined
         this.reconnectAttempt = 0
+        const accountPhoneNumber = phoneFromJid(sock.user?.id)
+        this.accountPhoneNumber = accountPhoneNumber
+        if (accountPhoneNumber) {
+          try {
+            await updateConnectionPhone(
+              this.connectionId,
+              this.claimToken,
+              accountPhoneNumber
+            )
+            logger.info(
+              {
+                connection_id: this.connectionId,
+                account_phone_number: accountPhoneNumber
+              },
+              'authenticated WhatsApp account'
+            )
+          } catch (err) {
+            if (err instanceof LostClaimError) this.loseClaim('claim_lost', err)
+            else logger.error(
+              { err, connection_id: this.connectionId },
+              'failed to persist authenticated WhatsApp account phone'
+            )
+          }
+        } else {
+          logger.warn(
+            { connection_id: this.connectionId },
+            'authenticated WhatsApp account has no phone JID'
+          )
+        }
         this.runtime = 'healthy'
         await this.publishState('connected', 'open', undefined, generation)
         return
