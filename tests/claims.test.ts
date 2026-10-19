@@ -17,6 +17,7 @@ const {
   getConnection,
   getGroupSubject,
   listConnections,
+  isRetryableDatabaseError,
   LostClaimError,
   releaseClaim,
   renewClaim,
@@ -52,6 +53,13 @@ describe('connection claims', () => {
     expect(query.mock.calls[1]![0]).toContain('claim_expires_at > now()')
   })
 
+  it('rotates a known stale token for recovery before its lease expires', async () => {
+    query.mockResolvedValueOnce({ rows: [{ claim_token: 'fresh-token' }] })
+
+    await expect(claimConnection('connection-id', 'instance-a', 'stale-token')).resolves.toBe('fresh-token')
+    expect(query.mock.calls[0]![0]).toContain('claim_token=$5::uuid')
+  })
+
   it('denies another live owner', async () => {
     query
       .mockResolvedValueOnce({ rows: [] })
@@ -64,10 +72,19 @@ describe('connection claims', () => {
     query.mockResolvedValueOnce({ rowCount: 1 })
     await expect(renewClaim('connection-id', 'instance-a', 'token')).resolves.toBe(true)
     expect(query.mock.calls[0]![0]).toContain('claim_token=$3::uuid')
+    expect(query.mock.calls[0]![0]).toContain("set_config('statement_timeout'")
+    expect(query.mock.calls[0]![1]?.[4]).toBe('5000ms')
 
     query.mockResolvedValueOnce({ rowCount: 0 })
     await expect(releaseClaim('connection-id', 'instance-a', 'token')).resolves.toBeUndefined()
     expect(query.mock.calls[1]![0]).toContain('claim_token=$3::uuid')
+  })
+
+  it('classifies database transport failures as retryable', () => {
+    expect(isRetryableDatabaseError({ code: 'ECONNRESET' })).toBe(true)
+    expect(isRetryableDatabaseError({ code: '57P01' })).toBe(true)
+    expect(isRetryableDatabaseError({ code: '23505' })).toBe(false)
+    expect(isRetryableDatabaseError(new Error('unknown'))).toBe(false)
   })
 
   it('supports connection and administrative repository operations', async () => {

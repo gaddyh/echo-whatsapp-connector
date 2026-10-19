@@ -114,7 +114,24 @@ export async function listConnections(): Promise<ConnectionRow[]> {
 
 const CLAIM_TTL_SECONDS = 30
 
-export async function claimConnection(id: string, owner: string): Promise<string | null> {
+const RETRYABLE_DATABASE_CODES = new Set([
+  '08000', '08001', '08003', '08004', '08006', '08007', '08P01',
+  '57P01', '57P02', '57P03', '57014', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT',
+  'EPIPE', 'ENETDOWN', 'ENETUNREACH', 'EHOSTDOWN', 'EHOSTUNREACH'
+])
+
+export function isRetryableDatabaseError(err: unknown): boolean {
+  const code = typeof err === 'object' && err !== null && 'code' in err
+    ? String((err as { code?: unknown }).code)
+    : ''
+  return RETRYABLE_DATABASE_CODES.has(code)
+}
+
+export async function claimConnection(
+  id: string,
+  owner: string,
+  replaceToken?: string
+): Promise<string | null> {
   const token = crypto.randomUUID()
   const result = await pool.query<{ claim_token: string }>(
     `UPDATE whatsapp_connector.connections
@@ -122,11 +139,15 @@ export async function claimConnection(id: string, owner: string): Promise<string
             claim_expires_at=now() + ($4::text || ' seconds')::interval,
             updated_at=now()
       WHERE id=$1
-        AND (claim_expires_at IS NULL OR claim_expires_at <= now())
+        AND (
+          claim_expires_at IS NULL OR claim_expires_at <= now()
+          OR ($5::uuid IS NOT NULL AND claim_owner=$2 AND claim_token=$5::uuid)
+        )
       RETURNING claim_token`,
-    [id, owner, token, CLAIM_TTL_SECONDS]
+    [id, owner, token, CLAIM_TTL_SECONDS, replaceToken ?? null]
   )
   if (result.rows[0]?.claim_token) return result.rows[0].claim_token
+  if (replaceToken) return null
   const existing = await pool.query<{ claim_token: string }>(
     `SELECT claim_token
        FROM whatsapp_connector.connections
@@ -136,14 +157,23 @@ export async function claimConnection(id: string, owner: string): Promise<string
   return existing.rows[0]?.claim_token ?? null
 }
 
-export async function renewClaim(id: string, owner: string, token: string): Promise<boolean> {
+export async function renewClaim(
+  id: string,
+  owner: string,
+  token: string,
+  timeoutMs = 5000
+): Promise<boolean> {
   const result = await pool.query(
-    `UPDATE whatsapp_connector.connections
+    `WITH timeout_config AS (
+       SELECT set_config('statement_timeout', $5, true)
+     )
+     UPDATE whatsapp_connector.connections
         SET claim_expires_at=now() + ($4::text || ' seconds')::interval,
             updated_at=now()
+       FROM timeout_config
       WHERE id=$1 AND claim_owner=$2 AND claim_token=$3::uuid
         AND claim_expires_at > now()`,
-    [id, owner, token, CLAIM_TTL_SECONDS]
+    [id, owner, token, CLAIM_TTL_SECONDS, `${timeoutMs}ms`]
   )
   return result.rowCount === 1
 }
