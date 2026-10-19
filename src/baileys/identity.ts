@@ -1,8 +1,9 @@
 import type { NormalizedIdentity } from '../events/types.js'
 
-function phoneFromJid(jid?: string): string | undefined {
+export function phoneFromJid(jid?: string | null): string | undefined {
   if (!jid || !jid.endsWith('@s.whatsapp.net')) return undefined
-  return jid.split('@')[0]
+  const number = jid.split('@', 1)[0]?.split(':', 1)[0]
+  return number || undefined
 }
 
 export function normalizeIdentity(args: {

@@ -56,6 +56,7 @@ export interface ConnectionRow {
   status: ConnectionStatus
   raw_status: string | null
   phone_number: string | null
+  account_phone_number: string | null
   worker_id: string | null
   claim_owner: string | null
   claim_token: string | null
@@ -83,15 +84,29 @@ export async function createConnection(phoneNumber?: string): Promise<Connection
 
 export async function getConnection(id: string): Promise<ConnectionRow | null> {
   const res = await pool.query(
-    `SELECT id,status,raw_status,phone_number,worker_id,claim_owner,claim_token,claim_expires_at,settings
+    `SELECT id,status,raw_status,phone_number,account_phone_number,worker_id,claim_owner,claim_token,claim_expires_at,settings
        FROM whatsapp_connector.connections WHERE id=$1`, [id]
   )
   return res.rows[0] ?? null
 }
 
+export async function updateConnectionPhone(
+  id: string,
+  token: string,
+  phoneNumber: string
+): Promise<void> {
+  const result = await pool.query(
+    `UPDATE whatsapp_connector.connections
+        SET account_phone_number=$2, updated_at=now()
+      WHERE id=$1 AND ${claimPredicate(3)}`,
+    [id, phoneNumber, token]
+  )
+  if (result.rowCount !== 1) throw new LostClaimError(id)
+}
+
 export async function listConnections(): Promise<ConnectionRow[]> {
   const res = await pool.query(
-    `SELECT id,status,raw_status,phone_number,worker_id,claim_owner,claim_token,claim_expires_at,settings
+    `SELECT id,status,raw_status,phone_number,account_phone_number,worker_id,claim_owner,claim_token,claim_expires_at,settings
        FROM whatsapp_connector.connections ORDER BY created_at`
   )
   return res.rows

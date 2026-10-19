@@ -111,6 +111,8 @@ export class SessionManager {
       connection_id: row.id,
       status: row.status,
       provider_raw_status: row.raw_status,
+      phone_number: row.phone_number,
+      account_phone_number: this.sessions.get(row.id)?.authenticatedPhoneNumber ?? row.account_phone_number,
       worker_id: row.worker_id
     }
   }
