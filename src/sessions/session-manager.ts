@@ -29,6 +29,8 @@ export interface ConnectionRuntimeStatus {
   status: string
   persistent_status: ConnectionRow['status'] | null
   provider_raw_status: string | null
+  phone_number: string | null
+  account_phone_number: string | null
   worker_id: string | null
   runtime_state: SessionRuntimeState | 'recovering'
   claim_expires_at: Date | null
@@ -221,6 +223,8 @@ export class SessionManager {
       status,
       persistent_status: row.status,
       provider_raw_status: row.raw_status,
+      phone_number: row.phone_number,
+      account_phone_number: session?.authenticatedPhoneNumber ?? row.account_phone_number,
       worker_id: row.worker_id,
       runtime_state: runtimeState,
       claim_expires_at: row.claim_expires_at,
@@ -239,6 +243,8 @@ export class SessionManager {
       status: 'degraded',
       persistent_status: null,
       provider_raw_status: null,
+      phone_number: null,
+      account_phone_number: null,
       worker_id: env.WORKER_ID,
       runtime_state: runtimeState === 'healthy' ? 'claim_unverified' : runtimeState,
       claim_expires_at: null,

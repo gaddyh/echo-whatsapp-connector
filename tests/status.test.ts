@@ -32,6 +32,7 @@ const row = {
   status: 'connected',
   raw_status: 'open',
   phone_number: null,
+  account_phone_number: '+972546610653',
   worker_id: 'worker-a',
   claim_owner: 'instance-a',
   claim_token: 'token',
@@ -53,6 +54,7 @@ describe('lease-aware status', () => {
     await expect(manager.status('connection-id')).resolves.toMatchObject({
       status: 'degraded',
       persistent_status: 'connected',
+      account_phone_number: '+972546610653',
       runtime_state: 'stopped',
       lease_valid: false,
       session_present: false,

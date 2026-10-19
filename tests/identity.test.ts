@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeIdentity } from '../src/baileys/identity.js'
+import { normalizeIdentity, phoneFromJid } from '../src/baileys/identity.js'
 
 describe('normalizeIdentity', () => {
+  it('extracts the account phone from a device JID', () => {
+    expect(phoneFromJid('972546610653:0@s.whatsapp.net')).toBe('972546610653')
+  })
+
   it('prefers LID as canonical while retaining PN', () => {
     expect(normalizeIdentity({
       participant: '123456789@lid',
