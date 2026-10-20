@@ -189,8 +189,25 @@ describe('Session claim lifecycle', () => {
     await vi.advanceTimersByTimeAsync(120_001)
     expect(session.latestQr).toBeUndefined()
 
-    await session.preparePairing()
+    await first.handlers.get('connection.update')!({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 401 } } }
+    })
+    await Promise.all([session.preparePairing(), session.preparePairing()])
     expect(makeWASocket).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not restart a live pairing socket while QR is preparing', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    const onLostClaim = vi.fn()
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', onLostClaim)
+
+    await session.start()
+    await Promise.all([session.preparePairing(), session.preparePairing()])
+    expect(makeWASocket).toHaveBeenCalledOnce()
+    expect(fixture.socket.end).not.toHaveBeenCalled()
   })
 
   it('keeps capped reconnect delays below the maximum', async () => {

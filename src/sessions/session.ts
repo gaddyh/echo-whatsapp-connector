@@ -42,6 +42,10 @@ export class Session {
   private auth?: Awaited<ReturnType<typeof createPostgresAuthState>>
   private qr?: string
   private qrIssuedAt?: number
+  private socketOpening = false
+  private socketUsable = false
+  private openingPromise?: Promise<void>
+  private pairingPreparation?: Promise<void>
   private reconnectAttempt = 0
   private stopped = false
   private lostClaim = false
@@ -65,12 +69,13 @@ export class Session {
 
   get socket(): WASocket | undefined { return this.sock }
   get latestQr(): string | undefined {
-    if (!this.qr || this.qrIssuedAt === undefined) return undefined
+    if (!this.socketUsable || !this.qr || this.qrIssuedAt === undefined) return undefined
     return Date.now() - this.qrIssuedAt <= env.QR_TTL_MS ? this.qr : undefined
   }
   get capability(): string { return this.claimToken }
   get authenticatedPhoneNumber(): string | undefined { return this.accountPhoneNumber }
   get runtimeState(): SessionRuntimeState { return this.runtime }
+  get pairingSocketUsable(): boolean { return this.socketUsable }
 
   private isActive(generation = this.generation): boolean {
     return !this.stopped && !this.lostClaim && generation === this.generation
@@ -86,6 +91,8 @@ export class Session {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     try { this.sock?.end(undefined) } catch { /* best effort */ }
     this.sock = undefined
+    this.socketUsable = false
+    this.socketOpening = false
     logger.warn({ err, connection_id: this.connectionId, instance_id: INSTANCE_ID, reason }, 'connection ownership lost')
     this.onLostClaim(reason, err)
   }
@@ -155,7 +162,19 @@ export class Session {
   }
 
   private async openSocket(): Promise<void> {
+    if (this.openingPromise) return this.openingPromise
+    const opening = this.openSocketInternal()
+    this.openingPromise = opening
+    try {
+      await opening
+    } finally {
+      if (this.openingPromise === opening) this.openingPromise = undefined
+    }
+  }
+
+  private async openSocketInternal(): Promise<void> {
     if (this.stopped || this.lostClaim) return
+    this.socketOpening = true
     const generation = this.generation
     await this.publishState('connecting', 'opening_socket', undefined, generation)
     if (this.stopped || this.lostClaim) return
@@ -176,6 +195,8 @@ export class Session {
       getMessage: async () => undefined
     })
     this.sock = sock
+    this.socketOpening = false
+    this.socketUsable = true
 
     sock.ev.on('creds.update', async () => {
       try { await this.auth?.saveCreds() }
@@ -230,6 +251,8 @@ export class Session {
         return
       }
       if (update.connection === 'close') {
+        this.socketUsable = false
+        this.socketOpening = false
         const statusCode = Number((update.lastDisconnect?.error as any)?.output?.statusCode ?? 0)
         await this.handleDisconnect(statusCode, generation)
       }
@@ -382,17 +405,34 @@ export class Session {
   }
 
   async preparePairing(): Promise<void> {
-    if (this.stopped || this.lostClaim) return
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = undefined
+    if (this.pairingPreparation) return this.pairingPreparation
+    const preparation = (async () => {
+      if (this.stopped || this.lostClaim) return
+      if (this.socketOpening) {
+        if (this.openingPromise) await this.openingPromise
+        return
+      }
+      if (this.socketUsable) return
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer)
+        this.reconnectTimer = undefined
+      }
+      this.generation += 1
+      try { this.sock?.end(undefined) } catch { /* best effort */ }
+      this.sock = undefined
+      this.socketUsable = false
+      this.socketOpening = false
+      this.qr = undefined
+      this.qrIssuedAt = undefined
+      this.runtime = 'starting'
+      await this.openSocket()
+    })()
+    this.pairingPreparation = preparation
+    try {
+      await preparation
+    } finally {
+      if (this.pairingPreparation === preparation) this.pairingPreparation = undefined
     }
-    this.generation += 1
-    try { this.sock?.end(undefined) } catch { /* best effort */ }
-    this.sock = undefined
-    this.qr = undefined
-    this.runtime = 'starting'
-    await this.openSocket()
   }
 
   async requestPairingCode(phoneNumber: string): Promise<string> {
@@ -455,6 +495,8 @@ export class Session {
     }
     await this.auth?.clear()
     this.sock = undefined
+    this.socketUsable = false
+    this.socketOpening = false
     this.qr = undefined
     this.qrIssuedAt = undefined
     await this.publishState('pairing_required', 'operator_unpair', undefined, this.generation, true)
@@ -467,5 +509,7 @@ export class Session {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     try { this.sock?.end(undefined) } catch { /* best effort */ }
     this.sock = undefined
+    this.socketUsable = false
+    this.socketOpening = false
   }
 }
