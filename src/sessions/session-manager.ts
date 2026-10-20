@@ -267,6 +267,17 @@ export class SessionManager {
     return rows.map(row => this.runtimeStatus(row))
   }
 
+  async preparePairing(connectionId: string) {
+    const row = await getConnection(connectionId)
+    if (!row) throw new Error('connection not found')
+    if (row.status === 'connected') return { outcome: 'already_authorized' as const }
+    const session = await this.start(connectionId)
+    if (!session.latestQr) await session.preparePairing()
+    return session.latestQr
+      ? { outcome: 'qr_ready' as const }
+      : { outcome: 'preparing' as const, message: 'QR not available yet' }
+  }
+
   async qr(connectionId: string) {
     const session = await this.start(connectionId)
     const qr = session.latestQr
@@ -274,7 +285,7 @@ export class SessionManager {
       const row = await getConnection(connectionId)
       return row?.status === 'connected'
         ? { outcome: 'already_authorized' as const }
-        : { outcome: 'timeout' as const, message: 'QR not available yet' }
+        : { outcome: 'preparing' as const, message: 'QR not available yet' }
     }
     const dataUrl = await QRCode.toDataURL(qr, { errorCorrectionLevel: 'M' })
     return {

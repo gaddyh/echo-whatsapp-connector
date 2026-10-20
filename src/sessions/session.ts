@@ -41,6 +41,7 @@ export class Session {
   private sock?: WASocket
   private auth?: Awaited<ReturnType<typeof createPostgresAuthState>>
   private qr?: string
+  private qrIssuedAt?: number
   private reconnectAttempt = 0
   private stopped = false
   private lostClaim = false
@@ -63,7 +64,10 @@ export class Session {
   }
 
   get socket(): WASocket | undefined { return this.sock }
-  get latestQr(): string | undefined { return this.qr }
+  get latestQr(): string | undefined {
+    if (!this.qr || this.qrIssuedAt === undefined) return undefined
+    return Date.now() - this.qrIssuedAt <= env.QR_TTL_MS ? this.qr : undefined
+  }
   get capability(): string { return this.claimToken }
   get authenticatedPhoneNumber(): string | undefined { return this.accountPhoneNumber }
   get runtimeState(): SessionRuntimeState { return this.runtime }
@@ -185,10 +189,12 @@ export class Session {
       if (!this.isActive(generation)) return
       if (update.qr) {
         this.qr = update.qr
+        this.qrIssuedAt = Date.now()
         await this.publishState('pairing_required', 'qr_ready', undefined, generation)
       }
       if (update.connection === 'open') {
         this.qr = undefined
+        this.qrIssuedAt = undefined
         this.reconnectAttempt = 0
         const accountPhoneNumber = phoneFromJid(sock.user?.id)
         this.accountPhoneNumber = accountPhoneNumber
@@ -375,6 +381,20 @@ export class Session {
     }, delay)
   }
 
+  async preparePairing(): Promise<void> {
+    if (this.stopped || this.lostClaim) return
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = undefined
+    }
+    this.generation += 1
+    try { this.sock?.end(undefined) } catch { /* best effort */ }
+    this.sock = undefined
+    this.qr = undefined
+    this.runtime = 'starting'
+    await this.openSocket()
+  }
+
   async requestPairingCode(phoneNumber: string): Promise<string> {
     if (!this.sock) await this.openSocket()
     return await this.sock!.requestPairingCode(phoneNumber.replace(/\D/g, ''))
@@ -436,6 +456,7 @@ export class Session {
     await this.auth?.clear()
     this.sock = undefined
     this.qr = undefined
+    this.qrIssuedAt = undefined
     await this.publishState('pairing_required', 'operator_unpair', undefined, this.generation, true)
   }
 

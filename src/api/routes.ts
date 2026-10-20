@@ -80,6 +80,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return status
   })
 
+  app.post('/connections/:id/prepare-pairing', async req => {
+    const { id } = req.params as { id: string }
+    return sessionManager.preparePairing(id)
+  })
+
   app.get('/connections/:id/qr', async req => {
     const { id } = req.params as { id: string }
     return sessionManager.qr(id)

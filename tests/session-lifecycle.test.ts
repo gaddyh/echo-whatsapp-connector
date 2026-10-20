@@ -25,6 +25,7 @@ vi.mock('../src/config/env.js', () => ({
     BAILEYS_BROWSER_NAME: 'Echo Guard',
     RECONNECT_BASE_DELAY_MS: 2000,
     RECONNECT_MAX_DELAY_MS: 60000,
+    QR_TTL_MS: 120000,
     MAX_MEDIA_BYTES: 1024,
     MEDIA_BASE_URL: 'http://localhost:8080',
     MEDIA_SIGNING_SECRET: 'test',
@@ -172,6 +173,24 @@ describe('Session claim lifecycle', () => {
       'logged_out:401',
       'logged_out:401'
     )
+  })
+
+  it('expires stale QR data and prepares a fresh pairing socket on request', async () => {
+    const first = socketFixture()
+    const second = socketFixture()
+    makeWASocket.mockReturnValueOnce(first.socket).mockReturnValueOnce(second.socket)
+    const onLostClaim = vi.fn()
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', onLostClaim)
+
+    await session.start()
+    await first.handlers.get('connection.update')!({ qr: 'qr-1' })
+    expect(session.latestQr).toBe('qr-1')
+    await vi.advanceTimersByTimeAsync(120_001)
+    expect(session.latestQr).toBeUndefined()
+
+    await session.preparePairing()
+    expect(makeWASocket).toHaveBeenCalledTimes(2)
   })
 
   it('keeps capped reconnect delays below the maximum', async () => {
