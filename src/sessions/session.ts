@@ -42,10 +42,12 @@ export class Session {
   private auth?: Awaited<ReturnType<typeof createPostgresAuthState>>
   private qr?: string
   private qrIssuedAt?: number
+  private pairingProgressAt?: number
   private socketOpening = false
   private socketUsable = false
   private openingPromise?: Promise<void>
   private pairingPreparation?: Promise<void>
+  private logoutInFlight?: Promise<void>
   private reconnectAttempt = 0
   private stopped = false
   private lostClaim = false
@@ -113,9 +115,17 @@ export class Session {
     }
   }
 
-  async start(): Promise<void> {
+  async start(resetLoggedOutAuth = false): Promise<void> {
     this.stopped = false
     this.runtime = 'starting'
+    if (resetLoggedOutAuth) {
+      const auth = await createPostgresAuthState(this.db, this.connectionId, this.claimToken)
+      await auth.clear()
+      logger.info(
+        { event: 'reconnect.auth_cleared', connection_id: this.connectionId, reason: 'restart' },
+        'logged-out connection auth cleared after restart'
+      )
+    }
     await this.openSocket()
   }
 
@@ -197,6 +207,7 @@ export class Session {
     this.sock = sock
     this.socketOpening = false
     this.socketUsable = true
+    this.pairingProgressAt = Date.now()
 
     sock.ev.on('creds.update', async () => {
       try { await this.auth?.saveCreds() }
@@ -211,6 +222,8 @@ export class Session {
       if (update.qr) {
         this.qr = update.qr
         this.qrIssuedAt = Date.now()
+        this.pairingProgressAt = this.qrIssuedAt
+        logger.info({ event: 'reconnect.qr_emitted', connection_id: this.connectionId }, 'pairing QR emitted')
         await this.publishState('pairing_required', 'qr_ready', undefined, generation)
       }
       if (update.connection === 'open') {
@@ -254,7 +267,15 @@ export class Session {
         this.socketUsable = false
         this.socketOpening = false
         const statusCode = Number((update.lastDisconnect?.error as any)?.output?.statusCode ?? 0)
-        await this.handleDisconnect(statusCode, generation)
+        const handling = this.handleDisconnect(statusCode, generation)
+        if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+          this.logoutInFlight = handling
+        }
+        try {
+          await handling
+        } finally {
+          if (this.logoutInFlight === handling) this.logoutInFlight = undefined
+        }
       }
     })
 
@@ -374,12 +395,27 @@ export class Session {
         clearTimeout(this.reconnectTimer)
         this.reconnectTimer = undefined
       }
+      logger.info({ event: 'reconnect.auth_lost', connection_id: this.connectionId, status_code: statusCode }, 'authenticated connection logged out')
       await this.publishState(
         'pairing_required',
         `logged_out:${statusCode}`,
         `logged_out:${statusCode}`,
         generation
       )
+      if (!this.isActive(generation)) return
+      await this.auth?.clear()
+      logger.info(
+        { event: 'reconnect.auth_cleared', connection_id: this.connectionId },
+        'logged-out connection auth cleared for pairing'
+      )
+      if (!this.isActive(generation)) return
+      this.generation += 1
+      try { this.sock?.end(undefined) } catch { /* best effort */ }
+      this.sock = undefined
+      this.socketUsable = false
+      this.runtime = 'stopped'
+      this.qr = undefined
+      this.qrIssuedAt = undefined
       return
     }
 
@@ -407,12 +443,19 @@ export class Session {
   async preparePairing(): Promise<void> {
     if (this.pairingPreparation) return this.pairingPreparation
     const preparation = (async () => {
+      if (this.logoutInFlight) await this.logoutInFlight
       if (this.stopped || this.lostClaim) return
       if (this.socketOpening) {
         if (this.openingPromise) await this.openingPromise
         return
       }
-      if (this.socketUsable) return
+      if (this.runtime === 'healthy') return
+      if (this.socketUsable && this.pairingProgressAt !== undefined &&
+          Date.now() - this.pairingProgressAt < env.PAIRING_QR_RECOVERY_MS) {
+        logger.info({ event: 'reconnect.pairing_pending', connection_id: this.connectionId }, 'waiting for pairing QR')
+        return
+      }
+      logger.info({ event: 'reconnect.pairing_restarted', connection_id: this.connectionId }, 'restarting unavailable pairing socket')
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer)
         this.reconnectTimer = undefined

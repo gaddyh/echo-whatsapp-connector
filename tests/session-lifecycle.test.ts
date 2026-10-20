@@ -6,6 +6,8 @@ const updateConnectionStatusAndEvent = vi.fn()
 const updateConnectionStatus = vi.fn()
 const updateConnectionPhone = vi.fn()
 const createPostgresAuthState = vi.fn()
+const clearAuth = vi.fn()
+const infoLog = vi.fn()
 
 vi.mock('@whiskeysockets/baileys', () => ({
   Browsers: { ubuntu: vi.fn(() => ['Ubuntu', 'Echo Guard', '22.04.4']) },
@@ -26,6 +28,7 @@ vi.mock('../src/config/env.js', () => ({
     RECONNECT_BASE_DELAY_MS: 2000,
     RECONNECT_MAX_DELAY_MS: 60000,
     QR_TTL_MS: 120000,
+    PAIRING_QR_RECOVERY_MS: 240000,
     MAX_MEDIA_BYTES: 1024,
     MEDIA_BASE_URL: 'http://localhost:8080',
     MEDIA_SIGNING_SECRET: 'test',
@@ -35,7 +38,7 @@ vi.mock('../src/config/env.js', () => ({
 
 vi.mock('../src/config/process-identity.js', () => ({ INSTANCE_ID: 'instance-a' }))
 vi.mock('../src/observability/logger.js', () => ({
-  logger: { child: vi.fn(() => ({})), warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() }
+  logger: { child: vi.fn(() => ({})), warn: vi.fn(), error: vi.fn(), info: infoLog, debug: vi.fn() }
 }))
 vi.mock('../src/auth/postgres-auth-state.js', () => ({ createPostgresAuthState }))
 vi.mock('../src/baileys/version-provider.js', () => ({ resolveWaVersion: vi.fn(async () => [2, 3000, 1]) }))
@@ -71,7 +74,8 @@ describe('Session claim lifecycle', () => {
     updateConnectionStatusAndEvent.mockResolvedValue({})
     updateConnectionStatus.mockResolvedValue(undefined)
     renewClaim.mockResolvedValue(true)
-    createPostgresAuthState.mockResolvedValue({ state: { creds: {}, keys: {} }, saveCreds: vi.fn(), clear: vi.fn() })
+    clearAuth.mockResolvedValue(undefined)
+    createPostgresAuthState.mockResolvedValue({ state: { creds: {}, keys: {} }, saveCreds: vi.fn(), clear: clearAuth })
   })
 
   afterEach(() => {
@@ -175,6 +179,92 @@ describe('Session claim lifecycle', () => {
     )
   })
 
+  it('clears persisted auth after confirmed logout before creating a new QR socket', async () => {
+    const first = socketFixture()
+    const second = socketFixture()
+    makeWASocket.mockReturnValueOnce(first.socket).mockReturnValueOnce(second.socket)
+    createPostgresAuthState
+      .mockResolvedValueOnce({ state: { creds: { registered: true }, keys: {} }, clear: clearAuth, saveCreds: vi.fn() })
+      .mockResolvedValueOnce({ state: { creds: { registered: false }, keys: {} }, clear: clearAuth, saveCreds: vi.fn() })
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+
+    await session.start()
+    await first.handlers.get('connection.update')!({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 401 } } }
+    })
+    expect(clearAuth).toHaveBeenCalledOnce()
+    expect(infoLog).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'reconnect.auth_cleared', connection_id: 'connection-id' }),
+      expect.any(String)
+    )
+    await session.preparePairing()
+    expect(makeWASocket).toHaveBeenCalledTimes(2)
+    expect(makeWASocket.mock.calls[1]![0].auth.creds.registered).toBe(false)
+    await second.handlers.get('connection.update')!({ qr: 'fresh-qr' })
+    expect(session.latestQr).toBe('fresh-qr')
+    await session.stop()
+  })
+
+  it('waits for persisted logout reset before preparing a socket on a fast click', async () => {
+    const first = socketFixture()
+    const second = socketFixture()
+    makeWASocket.mockReturnValueOnce(first.socket).mockReturnValueOnce(second.socket)
+    createPostgresAuthState
+      .mockResolvedValueOnce({ state: { creds: { registered: true }, keys: {} }, clear: clearAuth, saveCreds: vi.fn() })
+      .mockResolvedValueOnce({ state: { creds: { registered: false }, keys: {} }, clear: clearAuth, saveCreds: vi.fn() })
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+    await session.start()
+    let finishPublish!: (value: object) => void
+    updateConnectionStatusAndEvent.mockImplementationOnce(() => new Promise(resolve => { finishPublish = resolve }))
+    const closing = first.handlers.get('connection.update')!({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 401 } } }
+    })
+    const preparing = session.preparePairing()
+    await Promise.resolve()
+    expect(makeWASocket).toHaveBeenCalledOnce()
+    finishPublish({})
+    await Promise.all([closing, preparing])
+    expect(clearAuth).toHaveBeenCalledOnce()
+    expect(makeWASocket).toHaveBeenCalledTimes(2)
+    expect(makeWASocket.mock.calls[1]![0].auth.creds.registered).toBe(false)
+    await session.stop()
+  })
+
+  it('resets persisted logged-out credentials before opening a QR socket after restart', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    createPostgresAuthState
+      .mockResolvedValueOnce({ state: { creds: { registered: true }, keys: {} }, clear: clearAuth, saveCreds: vi.fn() })
+      .mockResolvedValueOnce({ state: { creds: { registered: false }, keys: {} }, clear: clearAuth, saveCreds: vi.fn() })
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+
+    await session.start(true)
+    expect(clearAuth).toHaveBeenCalledOnce()
+    expect(makeWASocket.mock.calls[0]![0].auth.creds.registered).toBe(false)
+    await fixture.handlers.get('connection.update')!({ qr: 'fresh-restart-qr' })
+    expect(session.latestQr).toBe('fresh-restart-qr')
+    await session.stop()
+  })
+
+  it('does not clear auth for a transient disconnect', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+    await session.start()
+    await fixture.handlers.get('connection.update')!({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 500 } } }
+    })
+    expect(clearAuth).not.toHaveBeenCalled()
+    await session.stop()
+  })
+
   it('expires stale QR data and prepares a fresh pairing socket on request', async () => {
     const first = socketFixture()
     const second = socketFixture()
@@ -208,6 +298,28 @@ describe('Session claim lifecycle', () => {
     await Promise.all([session.preparePairing(), session.preparePairing()])
     expect(makeWASocket).toHaveBeenCalledOnce()
     expect(fixture.socket.end).not.toHaveBeenCalled()
+  })
+
+  it('restarts a stalled pairing socket only after a bounded wait without a fresh QR', async () => {
+    const first = socketFixture()
+    const second = socketFixture()
+    makeWASocket.mockReturnValueOnce(first.socket).mockReturnValueOnce(second.socket)
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+
+    await session.start()
+    await first.handlers.get('connection.update')!({ qr: 'expired-qr' })
+    await vi.advanceTimersByTimeAsync(120_001)
+    expect(session.latestQr).toBeUndefined()
+    await session.preparePairing()
+    expect(makeWASocket).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(119_999)
+    await Promise.all([session.preparePairing(), session.preparePairing()])
+    expect(makeWASocket).toHaveBeenCalledTimes(2)
+    expect(first.socket.end).toHaveBeenCalledOnce()
+    await second.handlers.get('connection.update')!({ qr: 'replacement-qr' })
+    expect(session.latestQr).toBe('replacement-qr')
+    await session.stop()
   })
 
   it('keeps capped reconnect delays below the maximum', async () => {
