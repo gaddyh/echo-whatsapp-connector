@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const getConnection = vi.fn()
 const listConnections = vi.fn()
+const claimConnection = vi.fn()
+const startSession = vi.fn()
 
 vi.mock('../src/config/env.js', () => ({
   env: {
@@ -17,7 +19,7 @@ vi.mock('../src/config/process-identity.js', () => ({ INSTANCE_ID: 'instance-a' 
 vi.mock('../src/db/pool.js', () => ({ pool: {} }))
 vi.mock('../src/db/repositories.js', () => ({
   assignWorker: vi.fn(),
-  claimConnection: vi.fn(),
+  claimConnection,
   createConnection: vi.fn(),
   deleteConnectionRow: vi.fn(),
   getConnection,
@@ -25,7 +27,12 @@ vi.mock('../src/db/repositories.js', () => ({
   listConnections,
   releaseClaim: vi.fn()
 }))
-vi.mock('../src/sessions/session.js', () => ({ Session: class Session {} }))
+vi.mock('../src/sessions/session.js', () => ({ Session: class Session {
+  start = startSession
+  stop = vi.fn()
+  capability = 'claim-token'
+  latestQr = undefined
+} }))
 
 const row = {
   id: 'connection-id',
@@ -43,6 +50,18 @@ describe('lease-aware status', () => {
   beforeEach(() => {
     getConnection.mockReset()
     listConnections.mockReset()
+    claimConnection.mockReset()
+    startSession.mockReset()
+  })
+
+  it('passes logged-out pairing state into explicit session startup', async () => {
+    getConnection.mockResolvedValue({ ...row, status: 'pairing_required', raw_status: 'logged_out:401' })
+    claimConnection.mockResolvedValue('claim-token')
+    const { SessionManager } = await import('../src/sessions/session-manager.js')
+    const manager = new SessionManager()
+    await manager.start('connection-id')
+    expect(startSession).toHaveBeenCalledWith(true)
+    await manager.shutdown()
   })
 
   it('does not report connected when the persisted lease has expired', async () => {

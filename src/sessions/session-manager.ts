@@ -143,7 +143,8 @@ export class SessionManager {
     this.runtimeStates.set(connectionId, 'starting')
     try {
       await assignWorker(connectionId, env.WORKER_ID)
-      await session.start()
+      await session.start(!automatic && row.status === 'pairing_required' &&
+        row.raw_status?.startsWith('logged_out:') === true)
       logger.info({ connection_id: connectionId, instance_id: INSTANCE_ID }, 'connection claim reacquired')
       return session
     } catch (err) {
