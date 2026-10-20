@@ -10,6 +10,7 @@ const schema = z.object({
   SESSION_START_STAGGER_MS: z.coerce.number().int().nonnegative().default(5000),
   RECONNECT_BASE_DELAY_MS: z.coerce.number().int().positive().default(2000),
   RECONNECT_MAX_DELAY_MS: z.coerce.number().int().positive().default(60000),
+  QR_TTL_MS: z.coerce.number().int().positive().default(120000),
   CLAIM_RENEW_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
   RECOVERY_BACKOFF_INITIAL_MS: z.coerce.number().int().positive().default(1000),
   RECOVERY_BACKOFF_MAX_MS: z.coerce.number().int().positive().default(30000),
