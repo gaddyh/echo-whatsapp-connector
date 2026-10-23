@@ -294,8 +294,36 @@ export class Session {
           this.mediaMessages.set(event.media_reference, msg)
           if (env.DOWNLOAD_MEDIA) {
             try {
+              // Diagnostic: snapshot the unwrapped message structure to
+              // understand why mediaKey is sometimes missing at download time
+              // despite the normalizer finding it.
+              const rawForDiag = unwrapMessage(msg.message) as Record<string, any>
+              const mediaKeys = Object.keys(rawForDiag).filter(k => k.endsWith('Message'))
+              const diagFields: Record<string, unknown> = {}
+              for (const mk of mediaKeys) {
+                const c = rawForDiag[mk]
+                if (c && typeof c === 'object') {
+                  diagFields[mk] = {
+                    has_mediaKey: c.mediaKey != null,
+                    has_url: !!c.url,
+                    has_directPath: !!c.directPath,
+                    has_encFilehash: !!c.encFilehash,
+                    has_mediaKeyTimestamp: c.mediaKeyTimestamp != null,
+                    mimetype: c.mimetype,
+                  }
+                }
+              }
               logger.info(
-                { connection_id: this.connectionId, media_reference: event.media_reference, kind: event.kind, mime: event.media_mime_type },
+                {
+                  connection_id: this.connectionId,
+                  media_reference: event.media_reference,
+                  kind: event.kind,
+                  mime: event.media_mime_type,
+                  unwrapped_message_types: mediaKeys,
+                  diag_fields: diagFields,
+                  has_msg_message: !!msg.message,
+                  msg_message_keys: msg.message ? Object.keys(msg.message) : null,
+                },
                 'media ingestion download start'
               )
               const media = await this.downloadMediaMessage(msg)

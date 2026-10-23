@@ -8,11 +8,13 @@ import {
   createConnection,
   deleteConnectionRow,
   getConnection,
+  getMediaBlob,
   isRetryableDatabaseError,
   listConnections,
   releaseClaim
 } from '../db/repositories.js'
 import { logger } from '../observability/logger.js'
+import { MediaDownloadError } from '../media/errors.js'
 import { Session, type SessionLossReason, type SessionRuntimeState } from './session.js'
 
 type ConnectionRow = Awaited<ReturnType<typeof getConnection>> extends infer T
@@ -306,7 +308,25 @@ export class SessionManager {
   }
 
   async downloadMedia(connectionId: string, reference: string): Promise<{ bytes: Buffer; mimeType?: string; fileName?: string }> {
-    const session = await this.start(connectionId)
+    // Serve from the PostgreSQL blob cache first — this is shared across pods
+    // and does not require a local session. This is critical for multi-pod
+    // deployments where the session lives on a different pod than the one
+    // handling the HTTP request.
+    const stored = await getMediaBlob(connectionId, reference)
+    if (stored) {
+      logger.info({ connection_id: connectionId, reference, bytes: stored.content.length }, 'media served from blob cache (no session needed)')
+      return { bytes: stored.content, mimeType: stored.mimeType, fileName: stored.fileName }
+    }
+    // No blob in cache — try the local session (which may have the message
+    // in its in-memory map and can download from WhatsApp on demand).
+    const session = this.sessions.get(connectionId)
+    if (!session) {
+      logger.warn(
+        { connection_id: connectionId, reference },
+        'media download failed: no blob cache and no local session (multi-pod)'
+      )
+      throw new MediaDownloadError('media not available on this worker (no blob cache, no local session)')
+    }
     return session.downloadMedia(reference)
   }
 
