@@ -589,8 +589,12 @@ export class Session {
   private async downloadMediaMessage(msg: WAMessage): Promise<{ bytes: Buffer; mimeType?: string; fileName?: string }> {
     if (!msg.message) throw new MediaPayloadIncompleteError('message does not contain media')
     const raw = unwrapMessage(msg.message) as Record<string, any>
+    // Use != null (excludes both null and undefined) because Baileys/protobuf
+    // can set absent media fields to null. Using !== undefined would match
+    // null fields and pick the wrong media type (e.g. audioMessage: null
+    // would be found before videoMessage: {...}).
     const mediaType = ['audio', 'image', 'video', 'document']
-      .find(type => raw[`${type}Message`] !== undefined)
+      .find(type => raw[`${type}Message`] != null)
     if (!mediaType) throw new MediaPayloadIncompleteError('message does not contain downloadable media')
     const content = raw[`${mediaType}Message`]
     if (!content || content.mediaKey == null) {
