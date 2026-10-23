@@ -15,19 +15,20 @@ export async function saveMediaBlob(
   mimeType?: string,
   fileName?: string
 ): Promise<void> {
+  const sizeBytes = content.length
   const result = await pool.query(
     `INSERT INTO whatsapp_connector.media_blobs(
-       connection_id, media_reference, mime_type, file_name, content
+       connection_id, media_reference, mime_type, file_name, content, size_bytes
      )
-     SELECT $1, $2, $3, $4, $5
+     SELECT $1, $2, $3, $4, $5, $6
       WHERE EXISTS (
         SELECT 1 FROM whatsapp_connector.connections
-         WHERE id=$1 AND claim_token=$6::uuid AND claim_expires_at > now()
+         WHERE id=$1 AND claim_token=$7::uuid AND claim_expires_at > now()
       )
      ON CONFLICT(connection_id, media_reference) DO UPDATE
        SET mime_type=EXCLUDED.mime_type, file_name=EXCLUDED.file_name,
-           content=EXCLUDED.content`,
-    [connectionId, reference, mimeType ?? null, fileName ?? null, content, claimToken]
+           content=EXCLUDED.content, size_bytes=EXCLUDED.size_bytes`,
+    [connectionId, reference, mimeType ?? null, fileName ?? null, content, sizeBytes, claimToken]
   )
   if (result.rowCount !== 1) throw new LostClaimError(connectionId)
 }
@@ -35,9 +36,9 @@ export async function saveMediaBlob(
 export async function getMediaBlob(
   connectionId: string,
   reference: string
-): Promise<{ content: Buffer; mimeType?: string; fileName?: string } | null> {
+): Promise<{ content: Buffer; mimeType?: string; fileName?: string; sizeBytes?: number } | null> {
   const result = await pool.query(
-    `SELECT content, mime_type, file_name
+    `SELECT content, mime_type, file_name, size_bytes
        FROM whatsapp_connector.media_blobs
       WHERE connection_id=$1 AND media_reference=$2`,
     [connectionId, reference]
@@ -47,7 +48,8 @@ export async function getMediaBlob(
   return {
     content: row.content as Buffer,
     mimeType: row.mime_type ?? undefined,
-    fileName: row.file_name ?? undefined
+    fileName: row.file_name ?? undefined,
+    sizeBytes: row.size_bytes ?? undefined
   }
 }
 
