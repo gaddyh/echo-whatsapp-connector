@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { env } from '../config/env.js'
 import { updateConnectionSettings } from '../db/repositories.js'
+import { MediaDownloadError, MediaPayloadIncompleteError, MediaTooLargeError } from '../media/errors.js'
 import { sessionManager } from '../sessions/session-manager.js'
 import { signedMediaUrl, verifyMediaSignature } from '../media/signed-urls.js'
 
@@ -39,8 +40,25 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (media.fileName) reply.header('content-disposition', `inline; filename="${media.fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}"`)
       return reply.send(media.bytes)
     } catch (err) {
-      req.log.warn({ err, connection_id: connectionId, reference }, 'media download failed')
-      return reply.code(404).send({ error: 'media unavailable' })
+      // Map typed media errors to accurate HTTP codes so callers (and operators)
+      // can distinguish deterministic failures from transient ones. External
+      // response bodies stay generic; structured internal logs carry the
+      // failure category, connection id and reference. Media keys and bytes
+      // are never logged.
+      if (err instanceof MediaTooLargeError) {
+        req.log.warn({ err, connection_id: connectionId, reference, category: 'too_large' }, 'media download rejected: oversized')
+        return reply.code(413).send({ error: 'media too large' })
+      }
+      if (err instanceof MediaPayloadIncompleteError) {
+        req.log.warn({ err, connection_id: connectionId, reference, category: 'unavailable' }, 'media download rejected: payload unavailable')
+        return reply.code(404).send({ error: 'media unavailable' })
+      }
+      if (err instanceof MediaDownloadError) {
+        req.log.warn({ err, connection_id: connectionId, reference, category: 'transient' }, 'media download failed: transient')
+        return reply.code(503).send({ error: 'media temporarily unavailable' })
+      }
+      req.log.error({ err, connection_id: connectionId, reference, category: 'unknown' }, 'media download failed: unexpected error')
+      return reply.code(500).send({ error: 'media unavailable' })
     }
   })
 
