@@ -17,6 +17,7 @@ import { logger } from '../observability/logger.js'
 import { normalizeMessage, unwrapMessage } from '../baileys/message-normalizer.js'
 import { phoneFromJid } from '../baileys/identity.js'
 import { signedMediaUrl } from '../media/signed-urls.js'
+import { MediaDownloadError, MediaPayloadIncompleteError, MediaTooLargeError } from '../media/errors.js'
 import { resolveWaVersion } from '../baileys/version-provider.js'
 import {
   getGroupSubject,
@@ -33,6 +34,9 @@ import {
 } from '../db/repositories.js'
 
 const RECONNECT_JITTER_RATIO = 0.25
+
+/** Bounded backoff (ms) for transient WhatsApp media download failures. */
+const MEDIA_RETRY_DELAYS_MS = [0, 2_000, 5_000]
 
 export type SessionRuntimeState = 'starting' | 'healthy' | 'degraded' | 'claim_unverified' | 'stopped'
 export type SessionLossReason = 'claim_lost' | 'claim_unverified'
@@ -489,34 +493,80 @@ export class Session {
       return { bytes: stored.content, mimeType: stored.mimeType, fileName: stored.fileName }
     }
     const message = this.mediaMessages.get(reference)
-    if (!message) throw new Error('media reference is unavailable')
-    return this.downloadMediaMessage(message)
+    if (!message) throw new MediaPayloadIncompleteError('media reference is unavailable')
+    const media = await this.downloadMediaMessage(message)
+    // Persist the on-demand download so subsequent requests are served from
+    // PostgreSQL instead of re-downloading from WhatsApp. A persist failure
+    // is recorded as a visible reliability event but does not withhold the
+    // already-downloaded bytes from the caller.
+    try {
+      await saveMediaBlob(
+        this.connectionId,
+        this.claimToken,
+        reference,
+        media.bytes,
+        media.mimeType,
+        media.fileName
+      )
+    } catch (err) {
+      if (err instanceof LostClaimError) {
+        this.loseClaim('claim_lost', err)
+        throw err
+      }
+      logger.error(
+        { err, event: 'media.persist_failed', connection_id: this.connectionId, reference },
+        'on-demand media download succeeded but persistence failed'
+      )
+    }
+    return media
   }
 
   private async downloadMediaMessage(msg: WAMessage): Promise<{ bytes: Buffer; mimeType?: string; fileName?: string }> {
-    if (!msg.message) throw new Error('message does not contain media')
+    if (!msg.message) throw new MediaPayloadIncompleteError('message does not contain media')
     const raw = unwrapMessage(msg.message) as Record<string, any>
     const mediaType = ['audio', 'image', 'video', 'document']
       .find(type => raw[`${type}Message`] !== undefined)
-    if (!mediaType) throw new Error('message does not contain downloadable media')
+    if (!mediaType) throw new MediaPayloadIncompleteError('message does not contain downloadable media')
     const content = raw[`${mediaType}Message`]
     if (!content || content.mediaKey == null) {
-      throw new Error('message media payload is incomplete')
+      throw new MediaPayloadIncompleteError()
     }
-    const stream = await downloadContentFromMessage(content, mediaType as any)
-    const chunks: Buffer[] = []
-    let size = 0
-    for await (const chunk of stream) {
-      const buffer = Buffer.from(chunk)
-      size += buffer.length
-      if (size > env.MAX_MEDIA_BYTES) throw new Error('media exceeds configured size limit')
-      chunks.push(buffer)
+    // Bounded retry for transient WhatsApp download failures only.
+    // Deterministic failures (missing mediaKey, oversized) throw above or
+    // inside the loop and are never retried.
+    let lastError: unknown
+    for (let attempt = 0; attempt < MEDIA_RETRY_DELAYS_MS.length; attempt++) {
+      if (!this.isActive()) throw new MediaDownloadError('connection lease no longer owned')
+      if (MEDIA_RETRY_DELAYS_MS[attempt]! > 0) {
+        await delay(MEDIA_RETRY_DELAYS_MS[attempt]!)
+        if (!this.isActive()) throw new MediaDownloadError('connection lease no longer owned')
+      }
+      try {
+        const stream = await downloadContentFromMessage(content, mediaType as any)
+        const chunks: Buffer[] = []
+        let size = 0
+        for await (const chunk of stream) {
+          const buffer = Buffer.from(chunk)
+          size += buffer.length
+          if (size > env.MAX_MEDIA_BYTES) throw new MediaTooLargeError()
+          chunks.push(buffer)
+        }
+        return {
+          bytes: Buffer.concat(chunks),
+          mimeType: content.mimetype,
+          fileName: content.fileName
+        }
+      } catch (err) {
+        // Deterministic failures fail immediately — no retry.
+        if (err instanceof MediaTooLargeError || err instanceof MediaPayloadIncompleteError) throw err
+        lastError = err
+        logger.warn(
+          { err, connection_id: this.connectionId, attempt: attempt + 1, max_attempts: MEDIA_RETRY_DELAYS_MS.length },
+          'transient media download attempt failed'
+        )
+      }
     }
-    return {
-      bytes: Buffer.concat(chunks),
-      mimeType: content.mimetype,
-      fileName: content.fileName
-    }
+    throw new MediaDownloadError('media download failed after retries', lastError)
   }
 
   async sendText(chatId: string, text: string): Promise<string> {
@@ -555,4 +605,8 @@ export class Session {
     this.socketUsable = false
     this.socketOpening = false
   }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
