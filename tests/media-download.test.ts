@@ -255,4 +255,43 @@ describe('Session media download', () => {
     expect(media.bytes.equals(bytes)).toBe(true)
     await session.stop()
   })
+
+  it('downloads video when audioMessage is null (protobuf null-field bug)', async () => {
+    // Baileys/protobuf can set absent media fields to null. The old code
+    // used `!== undefined` which matched null fields, causing audioMessage: null
+    // to be found before videoMessage: {...} — producing a false
+    // MediaPayloadIncompleteError. The fix uses `!= null` to skip null fields.
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    const bytes = Buffer.from('video-bytes')
+    downloadContentFromMessage.mockResolvedValue(asyncStream([bytes]))
+
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+    await session.start()
+
+    // Message with audioMessage: null AND videoMessage with mediaKey
+    const msg = {
+      key: { id: 'video-id', remoteJid: '15551234567@s.whatsapp.net', fromMe: false },
+      message: {
+        audioMessage: null,
+        videoMessage: {
+          mimetype: 'video/mp4',
+          mediaKey: Buffer.from('media-key'),
+          fileName: 'video.mp4',
+          url: 'https://whatsapp.test/direct',
+          directPath: '/path/to/video',
+          encFilehash: 'hash'
+        }
+      },
+      messageTimestamp: 1700000000
+    } as any
+    seedMedia(session, 'baileys:connection-id:video-id', msg)
+
+    const media = await session.downloadMedia('baileys:connection-id:video-id')
+    expect(media.bytes.equals(bytes)).toBe(true)
+    expect(media.mimeType).toBe('video/mp4')
+    expect(downloadContentFromMessage).toHaveBeenCalledTimes(1)
+    await session.stop()
+  })
 })
