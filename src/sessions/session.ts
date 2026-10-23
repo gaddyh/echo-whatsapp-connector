@@ -294,7 +294,15 @@ export class Session {
           this.mediaMessages.set(event.media_reference, msg)
           if (env.DOWNLOAD_MEDIA) {
             try {
+              logger.info(
+                { connection_id: this.connectionId, media_reference: event.media_reference, kind: event.kind, mime: event.media_mime_type },
+                'media ingestion download start'
+              )
               const media = await this.downloadMediaMessage(msg)
+              logger.info(
+                { connection_id: this.connectionId, media_reference: event.media_reference, bytes: media.bytes.length },
+                'media ingestion download succeeded'
+              )
               await saveMediaBlob(
                 this.connectionId,
                 this.claimToken,
@@ -303,9 +311,26 @@ export class Session {
                 media.mimeType,
                 media.fileName
               )
+              logger.info(
+                { connection_id: this.connectionId, media_reference: event.media_reference },
+                'media ingestion blob persisted'
+              )
             } catch (err) {
-              if (err instanceof LostClaimError) this.loseClaim('claim_lost', err)
-              else logger.warn({ err, connection_id: this.connectionId }, 'media persistence failed')
+              if (err instanceof LostClaimError) {
+                this.loseClaim('claim_lost', err)
+              } else {
+                logger.warn(
+                  {
+                    err,
+                    connection_id: this.connectionId,
+                    media_reference: event.media_reference,
+                    kind: event.kind,
+                    error_name: err instanceof Error ? err.name : typeof err,
+                    error_message: err instanceof Error ? err.message : String(err),
+                  },
+                  'media ingestion download or persistence failed'
+                )
+              }
             }
           }
           event.media_download_url = signedMediaUrl(
@@ -488,12 +513,24 @@ export class Session {
   }
 
   async downloadMedia(reference: string): Promise<{ bytes: Buffer; mimeType?: string; fileName?: string }> {
+    logger.info({ connection_id: this.connectionId, reference }, 'on-demand media download start')
     const stored = await getMediaBlob(this.connectionId, reference)
     if (stored) {
+      logger.info({ connection_id: this.connectionId, reference, bytes: stored.content.length }, 'on-demand media served from blob cache')
       return { bytes: stored.content, mimeType: stored.mimeType, fileName: stored.fileName }
     }
     const message = this.mediaMessages.get(reference)
-    if (!message) throw new MediaPayloadIncompleteError('media reference is unavailable')
+    if (!message) {
+      logger.warn(
+        { connection_id: this.connectionId, reference, media_messages_size: this.mediaMessages.size },
+        'on-demand media download failed: message not in in-memory map'
+      )
+      throw new MediaPayloadIncompleteError('media reference is unavailable')
+    }
+    logger.info(
+      { connection_id: this.connectionId, reference, has_message: !!message.message },
+      'on-demand media download: message found in memory, downloading'
+    )
     const media = await this.downloadMediaMessage(message)
     // Persist the on-demand download so subsequent requests are served from
     // PostgreSQL instead of re-downloading from WhatsApp. A persist failure
@@ -529,8 +566,24 @@ export class Session {
     if (!mediaType) throw new MediaPayloadIncompleteError('message does not contain downloadable media')
     const content = raw[`${mediaType}Message`]
     if (!content || content.mediaKey == null) {
+      logger.warn(
+        {
+          connection_id: this.connectionId,
+          media_type: mediaType,
+          has_content: !!content,
+          has_media_key: !!content?.mediaKey,
+          has_url: !!content?.url,
+          has_direct_path: !!content?.directPath,
+          has_enc_filehash: !!content?.encFilehash,
+        },
+        'media download rejected: payload incomplete'
+      )
       throw new MediaPayloadIncompleteError()
     }
+    logger.info(
+      { connection_id: this.connectionId, media_type: mediaType, has_url: !!content.url, has_direct_path: !!content.directPath },
+      'media download: payload valid, starting download'
+    )
     // Bounded retry for transient WhatsApp download failures only.
     // Deterministic failures (missing mediaKey, oversized) throw above or
     // inside the loop and are never retried.
