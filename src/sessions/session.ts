@@ -339,6 +339,7 @@ export class Session {
                 media.mimeType,
                 media.fileName
               )
+              event.media_size = media.bytes.length
               logger.info(
                 { connection_id: this.connectionId, media_reference: event.media_reference },
                 'media ingestion blob persisted'

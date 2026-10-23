@@ -45,6 +45,7 @@ export interface NormalizedMessageEvent {
   media_file_name?: string
   media_reference?: string
   media_download_url?: string
+  media_size?: number
 }
 
 export interface NormalizedConnectionEvent {
