@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { MediaTooLargeError } from '../src/media/errors.js'
 
 const renewClaim = vi.fn()
 const makeWASocket = vi.fn()
@@ -209,6 +210,36 @@ describe('Session media download', () => {
     await expect(session.downloadMedia('baileys:connection-id:video-id')).rejects.toThrow('media exceeds configured size limit')
     // Only one attempt — oversized is deterministic and not retried.
     expect(downloadContentFromMessage).toHaveBeenCalledTimes(1)
+    await session.stop()
+  })
+
+  it('MediaTooLargeError carries bytes_read, limit and declared_file_length', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    // Two chunks of 600 bytes each exceed the 1024 byte limit.
+    downloadContentFromMessage.mockResolvedValue(asyncStream([Buffer.alloc(600), Buffer.alloc(600)]))
+
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+    await session.start()
+    // The video fixture carries a declared fileLength of 50_000_000.
+    seedMedia(
+      session,
+      'baileys:connection-id:video-id',
+      videoMessage(Buffer.from('media-key'), { fileLength: 50_000_000 })
+    )
+
+    let caught: any
+    try {
+      await session.downloadMedia('baileys:connection-id:video-id')
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(MediaTooLargeError)
+    // The second chunk (600) pushes the running total to 1200, crossing 1024.
+    expect(caught.bytesRead).toBe(1200)
+    expect(caught.limit).toBe(1024)
+    expect(caught.declaredFileLength).toBe(50_000_000)
     await session.stop()
   })
 

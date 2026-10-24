@@ -49,7 +49,7 @@ describe('media route HTTP status codes', () => {
 
   it('returns 413 for oversized media', async () => {
     const { MediaTooLargeError } = await import('../src/media/errors.js')
-    downloadMedia.mockRejectedValue(new MediaTooLargeError())
+    downloadMedia.mockRejectedValue(new MediaTooLargeError(1200, 1024, 50_000_000))
     const app = await buildApp()
     const res = await app.inject({ method: 'GET', url: '/media/c/r?expires=9999&signature=x' })
     expect(res.statusCode).toBe(413)
