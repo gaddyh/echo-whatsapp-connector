@@ -85,6 +85,24 @@ function videoMessage(mediaKey: Buffer | null = Buffer.from('media-key'), extra:
   } as any
 }
 
+function stickerMessage(
+  mediaKey: Buffer | null = Buffer.from('sticker-media-key'),
+  extra: Record<string, unknown> = {}
+) {
+  return {
+    key: { id: 'sticker-id', remoteJid: '15551234567@s.whatsapp.net', fromMe: false },
+    message: {
+      stickerMessage: {
+        mimetype: 'image/webp',
+        mediaKey,
+        isAnimated: false,
+        ...extra
+      }
+    },
+    messageTimestamp: 1700000000
+  } as any
+}
+
 function asyncStream(chunks: Buffer[]) {
   return (async function* () {
     for (const c of chunks) yield c
@@ -292,6 +310,93 @@ describe('Session media download', () => {
     expect(media.bytes.equals(bytes)).toBe(true)
     expect(media.mimeType).toBe('video/mp4')
     expect(downloadContentFromMessage).toHaveBeenCalledTimes(1)
+    await session.stop()
+  })
+
+  it('downloads a static sticker via the sticker media type and persists it as image/webp', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    const bytes = Buffer.from('sticker-webp-bytes')
+    downloadContentFromMessage.mockResolvedValue(asyncStream([bytes]))
+
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+    await session.start()
+    seedMedia(session, 'baileys:connection-id:sticker-id', stickerMessage())
+
+    const media = await session.downloadMedia('baileys:connection-id:sticker-id')
+    expect(media.bytes.equals(bytes)).toBe(true)
+    expect(media.mimeType).toBe('image/webp')
+    // Critical: Baileys must be asked to download as 'sticker', not 'image'.
+    // The sticker payload's mediaKey/HKDF info is keyed for the sticker type.
+    expect(downloadContentFromMessage).toHaveBeenCalledTimes(1)
+    const [content, type] = downloadContentFromMessage.mock.calls[0]!
+    expect(type).toBe('sticker')
+    expect(content.mediaKey).toEqual(Buffer.from('sticker-media-key'))
+    expect(saveMediaBlob).toHaveBeenCalledWith(
+      'connection-id', 'claim-token', 'baileys:connection-id:sticker-id', bytes, 'image/webp', undefined
+    )
+    await session.stop()
+  })
+
+  it('rejects an animated sticker defensively without calling Baileys', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    downloadContentFromMessage.mockResolvedValue(asyncStream([Buffer.from('x')]))
+
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+    await session.start()
+    // An animated sticker seeded directly into the in-memory map. The
+    // normalizer would never emit a media_reference for this (it classifies
+    // animated stickers as `other`), but if one reached the download path
+    // it must be rejected rather than analyzed as a static image.
+    seedMedia(
+      session,
+      'baileys:connection-id:animated-sticker',
+      stickerMessage(Buffer.from('sticker-media-key'), { isAnimated: true })
+    )
+
+    await expect(session.downloadMedia('baileys:connection-id:animated-sticker')).rejects.toThrow(
+      'animated stickers are not supported'
+    )
+    expect(downloadContentFromMessage).not.toHaveBeenCalled()
+    await session.stop()
+  })
+
+  it('keeps a failed sticker download visibly incomplete rather than treated as analyzed', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    // Every attempt fails — the download must surface as an error, not a
+    // silent success, so the enrichment pipeline records it as incomplete.
+    downloadContentFromMessage.mockImplementation(async () => {
+      throw new Error('whatsapp transient failure')
+    })
+
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+    await session.start()
+    seedMedia(session, 'baileys:connection-id:sticker-id', stickerMessage())
+
+    const promise = session.downloadMedia('baileys:connection-id:sticker-id')
+    // Attach a handler immediately to avoid an unhandled-rejection warning
+    // while the fake timers advance through the retry backoff.
+    const result = promise.then(
+      () => { throw new Error('expected download to fail but it succeeded') },
+      (err: unknown) => err
+    )
+    await vi.advanceTimersByTimeAsync(2_000)
+    await vi.advanceTimersByTimeAsync(5_000)
+    const err = await result
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).message).toBe('media download failed after retries')
+    // All three retry attempts were made against the sticker type.
+    expect(downloadContentFromMessage).toHaveBeenCalledTimes(3)
+    for (const call of downloadContentFromMessage.mock.calls) {
+      expect(call[1]).toBe('sticker')
+    }
+    // Nothing was persisted — the failure is visible, not masked.
+    expect(saveMediaBlob).not.toHaveBeenCalled()
     await session.stop()
   })
 })

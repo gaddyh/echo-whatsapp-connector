@@ -594,10 +594,17 @@ export class Session {
     // can set absent media fields to null. Using !== undefined would match
     // null fields and pick the wrong media type (e.g. audioMessage: null
     // would be found before videoMessage: {...}).
-    const mediaType = ['audio', 'image', 'video', 'document']
+    const mediaType = ['audio', 'image', 'video', 'document', 'sticker']
       .find(type => raw[`${type}Message`] != null)
     if (!mediaType) throw new MediaPayloadIncompleteError('message does not contain downloadable media')
     const content = raw[`${mediaType}Message`]
+    // Defense in depth: animated stickers must never be downloaded as static
+    // images. The normalizer classifies them as `other` (no media_reference),
+    // so this path is unreachable in the normal flow — but reject explicitly
+    // if a sticker payload reaches here directly.
+    if (mediaType === 'sticker' && content?.isAnimated === true) {
+      throw new MediaPayloadIncompleteError('animated stickers are not supported')
+    }
     if (!content || content.mediaKey == null) {
       logger.warn(
         {
