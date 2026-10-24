@@ -35,6 +35,14 @@ function classify(m: any): { kind: MessageKind; text?: string; mime?: string; fi
     mime: m.documentMessage.mimetype ?? undefined,
     fileName: m.documentMessage.fileName ?? undefined
   }
+  // Static WhatsApp stickers are WebP images. Normalize them as `image` so
+  // Echo's existing image enrichment pipeline (gpt-4o vision, which supports
+  // WebP) can describe them. Animated stickers are explicitly excluded —
+  // they are not static images and must not be analyzed as such.
+  if (m.stickerMessage) {
+    if (m.stickerMessage.isAnimated === true) return { kind: 'other' }
+    return { kind: 'image', mime: 'image/webp' }
+  }
   if (m.reactionMessage) return { kind: 'reaction', text: m.reactionMessage.text ?? undefined, quoted: m.reactionMessage.key?.id ?? undefined }
   return { kind: 'other' }
 }
@@ -46,8 +54,12 @@ export function normalizeMessage(connectionId: string, msg: WAMessage): Normaliz
 
   const raw = unwrapMessage(msg.message)
   const info = classify(raw)
+  // A static sticker is classified as `image` but its mediaKey lives on
+  // `stickerMessage`, not `imageMessage`. Fall back to `stickerMessage` for
+  // the image kind only; real image messages have `imageMessage` so this
+  // fallback is never reached for them.
   const mediaContent = info.kind !== 'text' && info.kind !== 'other' && info.kind !== 'reaction'
-    ? raw?.[`${info.kind}Message`]
+    ? (raw?.[`${info.kind}Message`] ?? (info.kind === 'image' ? raw?.stickerMessage : undefined))
     : undefined
   const hasMediaKey = mediaContent?.mediaKey != null
   const isGroup = chatId.endsWith('@g.us')
