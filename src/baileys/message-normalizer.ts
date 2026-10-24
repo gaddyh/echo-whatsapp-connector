@@ -62,6 +62,13 @@ export function normalizeMessage(connectionId: string, msg: WAMessage): Normaliz
     ? (raw?.[`${info.kind}Message`] ?? (info.kind === 'image' ? raw?.stickerMessage : undefined))
     : undefined
   const hasMediaKey = mediaContent?.mediaKey != null
+  // WhatsApp declares the file size on the media payload (fileLength). Emit
+  // it as media_size on the normalized event so it lands in the messages
+  // table even when the download later fails (e.g. oversized) — the actual
+  // downloaded byte count overrides this after a successful download.
+  const declaredFileLength = typeof mediaContent?.fileLength === 'number'
+    ? mediaContent.fileLength
+    : undefined
   const isGroup = chatId.endsWith('@g.us')
   const keyAny = msg.key as any
   const participant = isGroup ? keyAny.participant : (msg.key.fromMe ? undefined : chatId)
@@ -89,6 +96,7 @@ export function normalizeMessage(connectionId: string, msg: WAMessage): Normaliz
     quoted_message_id: info.quoted,
     media_mime_type: info.mime,
     media_file_name: info.fileName,
+    media_size: declaredFileLength,
     ...(hasMediaKey
       ? { media_reference: mediaReference(connectionId, id) }
       : {})

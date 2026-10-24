@@ -46,7 +46,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       // failure category, connection id and reference. Media keys and bytes
       // are never logged.
       if (err instanceof MediaTooLargeError) {
-        req.log.warn({ err, connection_id: connectionId, reference, category: 'too_large' }, 'media download rejected: oversized')
+        req.log.warn(
+          {
+            err,
+            connection_id: connectionId,
+            reference,
+            category: 'too_large',
+            bytes_read: err.bytesRead,
+            declared_file_length: err.declaredFileLength,
+            limit: err.limit
+          },
+          'media download rejected: oversized'
+        )
         return reply.code(413).send({ error: 'media too large' })
       }
       if (err instanceof MediaPayloadIncompleteError) {

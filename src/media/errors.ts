@@ -19,9 +19,21 @@ export class MediaPayloadIncompleteError extends Error {
 
 /** The downloaded media exceeded the configured size limit. */
 export class MediaTooLargeError extends Error {
-  constructor(message = 'media exceeds configured size limit') {
+  readonly bytesRead: number
+  readonly declaredFileLength: number | undefined
+  readonly limit: number
+
+  constructor(
+    bytesRead: number,
+    limit: number,
+    declaredFileLength?: number,
+    message = 'media exceeds configured size limit'
+  ) {
     super(message)
     this.name = 'MediaTooLargeError'
+    this.bytesRead = bytesRead
+    this.limit = limit
+    this.declaredFileLength = declaredFileLength
   }
 }
 

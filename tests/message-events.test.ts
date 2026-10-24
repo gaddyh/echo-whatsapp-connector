@@ -246,4 +246,45 @@ describe('normalized message events', () => {
     expect(stickerEvent).toHaveProperty('media_reference')
     expect(imageEvent).toHaveProperty('media_reference')
   })
+
+  it('emits media_size from the declared fileLength on the media payload', () => {
+    // WhatsApp declares the file size as fileLength on the media payload.
+    // The normalizer emits it as media_size so the messages table records
+    // the size even when the download later fails (e.g. oversized).
+    const event = normalizeMessage('connection-id', {
+      key: {
+        id: 'video-with-size',
+        remoteJid: '15551234567@s.whatsapp.net',
+        fromMe: false
+      },
+      message: {
+        videoMessage: {
+          mimetype: 'video/mp4',
+          mediaKey: Buffer.from('media-key'),
+          fileLength: 52_428_800
+        }
+      }
+    } as any)
+
+    expect(event?.media_size).toBe(52_428_800)
+  })
+
+  it('omits media_size when the media payload has no fileLength', () => {
+    const event = normalizeMessage('connection-id', {
+      key: {
+        id: 'image-no-size',
+        remoteJid: '15551234567@s.whatsapp.net',
+        fromMe: false
+      },
+      message: {
+        imageMessage: {
+          mimetype: 'image/jpeg',
+          mediaKey: Buffer.from('media-key')
+        }
+      }
+    } as any)
+
+    expect(event).toHaveProperty('media_reference')
+    expect(event?.media_size).toBeUndefined()
+  })
 })

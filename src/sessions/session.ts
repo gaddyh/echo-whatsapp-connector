@@ -621,7 +621,16 @@ export class Session {
       throw new MediaPayloadIncompleteError()
     }
     logger.info(
-      { connection_id: this.connectionId, media_type: mediaType, has_url: !!content.url, has_direct_path: !!content.directPath },
+      {
+        connection_id: this.connectionId,
+        media_type: mediaType,
+        has_url: !!content.url,
+        has_direct_path: !!content.directPath,
+        // WhatsApp declares the file size on the payload (fileLength). Log it
+        // before the stream starts so operators can see the true size even
+        // when the download is aborted mid-stream for exceeding the limit.
+        declared_file_length: content.fileLength ?? undefined
+      },
       'media download: payload valid, starting download'
     )
     // Bounded retry for transient WhatsApp download failures only.
@@ -641,7 +650,9 @@ export class Session {
         for await (const chunk of stream) {
           const buffer = Buffer.from(chunk)
           size += buffer.length
-          if (size > env.MAX_MEDIA_BYTES) throw new MediaTooLargeError()
+          if (size > env.MAX_MEDIA_BYTES) {
+            throw new MediaTooLargeError(size, env.MAX_MEDIA_BYTES, content.fileLength ?? undefined)
+          }
           chunks.push(buffer)
         }
         return {
