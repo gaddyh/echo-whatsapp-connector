@@ -2,6 +2,7 @@ import type { WAMessage } from '@whiskeysockets/baileys'
 import type { MessageKind, NormalizedMessageEvent } from '../events/types.js'
 import { normalizeIdentity } from './identity.js'
 import { mediaReference } from '../media/reference.js'
+import { normalizeFileLength } from '../media/size.js'
 
 export function unwrapMessage(message: any): any {
   let m = message
@@ -66,9 +67,9 @@ export function normalizeMessage(connectionId: string, msg: WAMessage): Normaliz
   // it as media_size on the normalized event so it lands in the messages
   // table even when the download later fails (e.g. oversized) — the actual
   // downloaded byte count overrides this after a successful download.
-  const declaredFileLength = typeof mediaContent?.fileLength === 'number'
-    ? mediaContent.fileLength
-    : undefined
+  // Baileys/protobuf encodes 64-bit fileLength as a Long object at runtime;
+  // normalizeFileLength converts it to a plain number.
+  const declaredFileLength = normalizeFileLength(mediaContent?.fileLength)
   const isGroup = chatId.endsWith('@g.us')
   const keyAny = msg.key as any
   const participant = isGroup ? keyAny.participant : (msg.key.fromMe ? undefined : chatId)

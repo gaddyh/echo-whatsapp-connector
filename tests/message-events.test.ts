@@ -287,4 +287,26 @@ describe('normalized message events', () => {
     expect(event).toHaveProperty('media_reference')
     expect(event?.media_size).toBeUndefined()
   })
+
+  it('normalizes a protobuf Long fileLength to a plain number for media_size', () => {
+    // Baileys/protobuf encodes 64-bit fileLength as a Long object at runtime
+    // ({ low, high, unsigned }) with a toNumber() method, even though the
+    // TypeScript types declare it as number. The normalizer must convert it.
+    const event = normalizeMessage('connection-id', {
+      key: {
+        id: 'image-long-size',
+        remoteJid: '15551234567@s.whatsapp.net',
+        fromMe: false
+      },
+      message: {
+        imageMessage: {
+          mimetype: 'image/jpeg',
+          mediaKey: Buffer.from('media-key'),
+          fileLength: { low: 435915, high: 0, unsigned: true, toNumber: () => 435915 }
+        }
+      }
+    } as any)
+
+    expect(event?.media_size).toBe(435915)
+  })
 })

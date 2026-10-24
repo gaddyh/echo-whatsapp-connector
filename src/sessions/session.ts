@@ -18,6 +18,7 @@ import { normalizeMessage, unwrapMessage } from '../baileys/message-normalizer.j
 import { phoneFromJid } from '../baileys/identity.js'
 import { signedMediaUrl } from '../media/signed-urls.js'
 import { MediaDownloadError, MediaPayloadIncompleteError, MediaTooLargeError } from '../media/errors.js'
+import { normalizeFileLength } from '../media/size.js'
 import { resolveWaVersion } from '../baileys/version-provider.js'
 import {
   getGroupSubject,
@@ -629,7 +630,9 @@ export class Session {
         // WhatsApp declares the file size on the payload (fileLength). Log it
         // before the stream starts so operators can see the true size even
         // when the download is aborted mid-stream for exceeding the limit.
-        declared_file_length: content.fileLength ?? undefined
+        // Baileys/protobuf encodes 64-bit fileLength as a Long object at
+        // runtime; normalizeFileLength converts it to a plain number.
+        declared_file_length: normalizeFileLength(content.fileLength)
       },
       'media download: payload valid, starting download'
     )
@@ -651,7 +654,7 @@ export class Session {
           const buffer = Buffer.from(chunk)
           size += buffer.length
           if (size > env.MAX_MEDIA_BYTES) {
-            throw new MediaTooLargeError(size, env.MAX_MEDIA_BYTES, content.fileLength ?? undefined)
+            throw new MediaTooLargeError(size, env.MAX_MEDIA_BYTES, normalizeFileLength(content.fileLength))
           }
           chunks.push(buffer)
         }
