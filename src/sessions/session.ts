@@ -290,6 +290,47 @@ export class Session {
         if (!this.isActive(generation)) return
         const event = normalizeMessage(this.connectionId, msg)
         if (!event) continue
+        // Diagnostic: when a media-kind message has no media_reference, log
+        // the raw message structure so we can see why mediaKey is missing.
+        // Newsletter and some forwarded media may lack mediaKey, which means
+        // Baileys cannot decrypt the content — the normalizer correctly omits
+        // media_reference in that case, but we need visibility into the cause.
+        if (!event.media_reference && ['image', 'video', 'audio', 'document'].includes(event.kind)) {
+          const rawForDiag = unwrapMessage(msg.message) as Record<string, any>
+          const mediaKeys = Object.keys(rawForDiag).filter(k => k.endsWith('Message'))
+          const diagFields: Record<string, unknown> = {}
+          for (const mk of mediaKeys) {
+            const c = rawForDiag[mk]
+            if (c && typeof c === 'object') {
+              diagFields[mk] = {
+                has_mediaKey: c.mediaKey != null,
+                has_url: !!c.url,
+                has_directPath: !!c.directPath,
+                has_thumbnailDirectPath: !!c.thumbnailDirectPath,
+                has_encFilehash: !!c.encFilehash,
+                has_mediaKeyTimestamp: c.mediaKeyTimestamp != null,
+                mimetype: c.mimetype,
+                fileLength: c.fileLength,
+              }
+            }
+          }
+          logger.warn(
+            {
+              connection_id: this.connectionId,
+              kind: event.kind,
+              chat_id: event.chat_id,
+              provider_message_id: event.provider_message_id,
+              mime: event.media_mime_type,
+              has_text: !!event.text,
+              media_size: event.media_size,
+              unwrapped_message_types: mediaKeys,
+              diag_fields: diagFields,
+              has_msg_message: !!msg.message,
+              msg_message_keys: msg.message ? Object.keys(msg.message) : null,
+            },
+            'media message has no media_reference — mediaKey missing'
+          )
+        }
         if (event.media_reference) {
           this.mediaMessages.set(event.media_reference, msg)
           if (env.DOWNLOAD_MEDIA) {
