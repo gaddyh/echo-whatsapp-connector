@@ -312,13 +312,18 @@ export async function upsertIdentity(connectionId: string, token: string, identi
       `SELECT canonical_id, phone_jid, saved_name, push_name
          FROM whatsapp_connector.identities
         WHERE connection_id=$1
-          AND (canonical_id=$2 OR ($3::text IS NOT NULL AND phone_jid=$3))
+          AND (canonical_id=$2
+               OR ($3::text IS NOT NULL AND phone_jid=$3)
+               OR ($4::text IS NOT NULL AND lid=$4))
         FOR UPDATE`,
-      [connectionId, identity.canonical_id, identity.phone_jid ?? null]
+      [connectionId, identity.canonical_id, identity.phone_jid ?? null, identity.lid ?? null]
     )
     const canonical = existing.rows.find(row => row.canonical_id === identity.canonical_id)
     const phone = identity.phone_jid
       ? existing.rows.find(row => row.phone_jid === identity.phone_jid)
+      : undefined
+    const lidMatch = identity.lid
+      ? existing.rows.find(row => row.canonical_id !== identity.canonical_id && row.canonical_id !== phone?.canonical_id)
       : undefined
 
     if (canonical && phone && canonical.canonical_id !== phone.canonical_id) {
@@ -329,7 +334,9 @@ export async function upsertIdentity(connectionId: string, token: string, identi
       )
     }
 
-    const target = canonical ?? phone
+    // If we found an existing row by LID but with a different canonical_id,
+    // update its canonical_id to the new one rather than inserting a duplicate.
+    const target = canonical ?? phone ?? lidMatch
     if (target) {
       await client.query(
         `UPDATE whatsapp_connector.identities
