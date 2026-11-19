@@ -35,6 +35,13 @@ import {
 
 const RECONNECT_JITTER_RATIO = 0.25
 
+/**
+ * Bounds the in-memory lookback of messages kept for on-demand media fetches.
+ * Entries are dropped after their blob is persisted; unfetched entries are
+ * evicted oldest-first at this cap so the map cannot grow unboundedly.
+ */
+const MEDIA_MESSAGE_CACHE_MAX = 100
+
 /** Bounded backoff (ms) for transient WhatsApp media download failures. */
 const MEDIA_RETRY_DELAYS_MS = [0, 2_000, 5_000]
 
@@ -332,7 +339,7 @@ export class Session {
           )
         }
         if (event.media_reference) {
-          this.mediaMessages.set(event.media_reference, msg)
+          this.rememberMediaMessage(event.media_reference, msg)
           if (env.DOWNLOAD_MEDIA) {
             try {
               // Diagnostic: snapshot the unwrapped message structure to
@@ -381,6 +388,8 @@ export class Session {
                 media.fileName
               )
               event.media_size = media.bytes.length
+              // The blob is persisted; the in-memory copy is redundant.
+              this.mediaMessages.delete(event.media_reference)
               logger.info(
                 { connection_id: this.connectionId, media_reference: event.media_reference },
                 'media ingestion blob persisted'
@@ -615,6 +624,14 @@ export class Session {
     return await this.sock!.requestPairingCode(phoneNumber.replace(/\D/g, ''))
   }
 
+  private rememberMediaMessage(reference: string, msg: WAMessage): void {
+    if (this.mediaMessages.size >= MEDIA_MESSAGE_CACHE_MAX && !this.mediaMessages.has(reference)) {
+      const oldest = this.mediaMessages.keys().next()
+      if (!oldest.done) this.mediaMessages.delete(oldest.value)
+    }
+    this.mediaMessages.set(reference, msg)
+  }
+
   async downloadMedia(reference: string): Promise<{ bytes: Buffer; mimeType?: string; fileName?: string }> {
     logger.info({ connection_id: this.connectionId, reference }, 'on-demand media download start')
     const stored = await getMediaBlob(this.connectionId, reference)
@@ -648,6 +665,7 @@ export class Session {
         media.mimeType,
         media.fileName
       )
+      this.mediaMessages.delete(reference)
     } catch (err) {
       if (err instanceof LostClaimError) {
         this.loseClaim('claim_lost', err)

@@ -1,10 +1,13 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { env } from '../config/env.js'
+import { pool } from '../db/pool.js'
 import { updateConnectionSettings } from '../db/repositories.js'
 import { MediaDownloadError, MediaPayloadIncompleteError, MediaTooLargeError } from '../media/errors.js'
 import { sessionManager } from '../sessions/session-manager.js'
 import { signedMediaUrl, verifyMediaSignature } from '../media/signed-urls.js'
+
+const HEALTH_DB_TIMEOUT_MS = 2_000
 
 const createSchema = z.object({
   phone_number: z.string().optional(),
@@ -23,7 +26,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
   })
 
-  app.get('/health', async () => ({ status: 'ok', worker_id: env.WORKER_ID }))
+  app.get('/health', async (req, reply) => {
+    // Liveness alone is not enough: a Postgres outage claim-loses every
+    // session while the process keeps looking alive. Probe the database,
+    // time-boxed so a hung pool cannot hang the health check itself.
+    const databaseReachable = await Promise.race([
+      pool.query('SELECT 1').then(() => true).catch(() => false),
+      new Promise<false>(resolve => {
+        const timer = setTimeout(() => resolve(false), HEALTH_DB_TIMEOUT_MS)
+        timer.unref()
+      })
+    ])
+    if (!databaseReachable) {
+      req.log.error({ worker_id: env.WORKER_ID }, 'health check failed: database unreachable')
+      return reply.code(503).send({ status: 'unhealthy', database: 'unreachable', worker_id: env.WORKER_ID })
+    }
+    return { status: 'ok', worker_id: env.WORKER_ID }
+  })
 
   app.get('/media/:connectionId/:reference', async (req, reply) => {
     const { connectionId, reference } = req.params as { connectionId: string; reference: string }

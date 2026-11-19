@@ -430,4 +430,78 @@ describe('Session media download', () => {
     expect(saveMediaBlob).not.toHaveBeenCalled()
     await session.stop()
   })
+
+  it('drops the in-memory copy after an ingested media message is persisted', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    downloadContentFromMessage.mockResolvedValue(asyncStream([Buffer.from('video-bytes')]))
+
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+    await session.start()
+
+    await fixture.handlers.get('messages.upsert')!({ messages: [videoMessage()], type: 'notify' })
+
+    expect(saveMediaBlob).toHaveBeenCalledWith(
+      'connection-id', 'claim-token', 'baileys:connection-id:video-id',
+      Buffer.from('video-bytes'), 'video/mp4', 'video.mp4'
+    )
+    expect((session as any).mediaMessages.has('baileys:connection-id:video-id')).toBe(false)
+    await session.stop()
+  })
+
+  it('keeps the in-memory copy for a later retry when ingestion persistence fails', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    downloadContentFromMessage.mockResolvedValue(asyncStream([Buffer.from('video-bytes')]))
+    saveMediaBlob.mockRejectedValueOnce(new Error('db down'))
+
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+    await session.start()
+
+    await fixture.handlers.get('messages.upsert')!({ messages: [videoMessage()], type: 'notify' })
+
+    expect((session as any).mediaMessages.has('baileys:connection-id:video-id')).toBe(true)
+    await session.stop()
+  })
+
+  it('drops the in-memory copy after an on-demand download is persisted', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    downloadContentFromMessage.mockResolvedValue(asyncStream([Buffer.from('video-bytes')]))
+
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+    await session.start()
+    seedMedia(session, 'baileys:connection-id:video-id', videoMessage())
+    expect((session as any).mediaMessages.has('baileys:connection-id:video-id')).toBe(true)
+
+    await session.downloadMedia('baileys:connection-id:video-id')
+
+    expect((session as any).mediaMessages.has('baileys:connection-id:video-id')).toBe(false)
+    await session.stop()
+  })
+
+  it('bounds the in-memory media map, evicting the oldest entries', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+    await session.start()
+
+    for (let i = 0; i < 150; i++) {
+      ;(session as any).rememberMediaMessage(`baileys:connection-id:msg-${i}`, videoMessage())
+    }
+    expect((session as any).mediaMessages.size).toBe(100)
+    expect((session as any).mediaMessages.has('baileys:connection-id:msg-0')).toBe(false)
+    expect((session as any).mediaMessages.has('baileys:connection-id:msg-149')).toBe(true)
+
+    // Re-remembering an existing reference must not evict a different entry.
+    ;(session as any).rememberMediaMessage('baileys:connection-id:msg-100', videoMessage())
+    expect((session as any).mediaMessages.size).toBe(100)
+    expect((session as any).mediaMessages.has('baileys:connection-id:msg-50')).toBe(true)
+    await session.stop()
+  })
 })
