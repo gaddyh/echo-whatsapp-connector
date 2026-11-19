@@ -103,6 +103,9 @@ describe('log monitor digest loop', () => {
     const body = JSON.parse(init.body as string)
     expect(body).toMatchObject({ severity: 'info', title: 'quiet hour', source: 'connector', worker_id: 'worker-a' })
     expect(body.body).toContain('quiet hour')
+    expect(body.window).toEqual({ from: new Date(0).toISOString(), to: new Date(T).toISOString() })
+    expect(body.metrics.counters).toBeDefined()
+    expect(body.metrics.peak_recovery_per_min).toBeDefined()
   })
 
   it('keeps the digest flowing when endpoint delivery fails', async () => {
