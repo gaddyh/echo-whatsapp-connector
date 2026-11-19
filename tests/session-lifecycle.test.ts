@@ -134,7 +134,7 @@ describe('Session claim lifecycle', () => {
     })
 
     expect(makeWASocket).toHaveBeenCalledOnce()
-    await vi.advanceTimersByTimeAsync(1_749)
+    await vi.advanceTimersByTimeAsync(1_999)
     expect(makeWASocket).toHaveBeenCalledOnce()
     await vi.advanceTimersByTimeAsync(1)
     expect(makeWASocket).toHaveBeenCalledTimes(2)
@@ -144,7 +144,7 @@ describe('Session claim lifecycle', () => {
       connection: 'close',
       lastDisconnect: { error: { output: { statusCode: 500 } } }
     })
-    await vi.advanceTimersByTimeAsync(1_750)
+    await vi.advanceTimersByTimeAsync(2_000)
 
     expect(makeWASocket).toHaveBeenCalledTimes(3)
   })
@@ -334,7 +334,7 @@ describe('Session claim lifecycle', () => {
     await session.start()
     let currentIndex = 0
     let current = fixtures[currentIndex]!
-    const expectedDelays = [1_500, 3_000, 6_000, 12_000, 24_000, 45_000]
+    const expectedDelays = [2_500, 5_000, 10_000, 20_000, 40_000, 60_000]
     for (const delay of expectedDelays) {
       await current.handlers.get('connection.update')!({
         connection: 'close',
@@ -347,5 +347,27 @@ describe('Session claim lifecycle', () => {
       expect(makeWASocket).toHaveBeenCalledTimes(callsBefore + 1)
       current = fixtures[++currentIndex]!
     }
+  })
+
+  it('spreads reconnect retries below the base delay on low jitter draws', async () => {
+    const fixtures = [socketFixture(), socketFixture()]
+    let fixtureIndex = 0
+    makeWASocket.mockImplementation(() => fixtures[fixtureIndex++]!.socket)
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const onLostClaim = vi.fn()
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', onLostClaim)
+
+    await session.start()
+    await fixtures[0]!.handlers.get('connection.update')!({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 500 } } }
+    })
+
+    expect(makeWASocket).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1_499)
+    expect(makeWASocket).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(makeWASocket).toHaveBeenCalledTimes(2)
   })
 })

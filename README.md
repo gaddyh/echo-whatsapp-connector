@@ -319,7 +319,7 @@ npm run migrate
 For the first 20–100 Guard users:
 
 1. one connector container per small EC2 worker;
-2. start with 10–20 sessions per worker and measure;
+2. up to 100 sessions per worker (L3 herd-verified: a full 100-session restart ramp, claim-renewal wave and mass reconnect all pass against real PostgreSQL);
 3. use a stable public/Elastic IP per worker if IP stability matters operationally;
 4. shared PostgreSQL for encrypted auth and event inbox;
 5. stagger restored sessions using `SESSION_START_STAGGER_MS`;

@@ -16,11 +16,14 @@ const {
   findIdentityName,
   getConnection,
   getGroupSubject,
+  getMediaBlob,
   listConnections,
   isRetryableDatabaseError,
   LostClaimError,
   releaseClaim,
   renewClaim,
+  saveMediaBlob,
+  updateConnectionPhone,
   updateConnectionSettings,
   updateConnectionStatus,
   updateConnectionStatusAndEvent,
@@ -167,5 +170,109 @@ describe('connection claims', () => {
     const error = new LostClaimError('connection-id')
     expect(error.name).toBe('LostClaimError')
     expect(error.connectionId).toBe('connection-id')
+  })
+
+  it('saves and reads media blobs through the fenced write', async () => {
+    query.mockResolvedValueOnce({ rowCount: 1 })
+    await saveMediaBlob('id', 'token', 'ref', Buffer.from('data'), 'image/png', 'a.png')
+    expect(query.mock.calls[0]![0]).toContain('media_blobs')
+    expect(query.mock.calls[0]![1]).toEqual(['id', 'ref', 'image/png', 'a.png', Buffer.from('data'), 4, 'token'])
+
+    query.mockResolvedValueOnce({ rowCount: 0 })
+    await expect(saveMediaBlob('id', 'stale-token', 'ref', Buffer.from('data')))
+      .rejects.toBeInstanceOf(LostClaimError)
+
+    query.mockResolvedValueOnce({
+      rows: [{ content: Buffer.from('data'), mime_type: 'image/png', file_name: 'a.png', size_bytes: 4 }]
+    })
+    await expect(getMediaBlob('id', 'ref')).resolves.toEqual({
+      content: Buffer.from('data'), mimeType: 'image/png', fileName: 'a.png', sizeBytes: 4
+    })
+
+    query.mockResolvedValueOnce({ rows: [{ content: Buffer.from('data'), mime_type: null, file_name: null, size_bytes: null }] })
+    await expect(getMediaBlob('id', 'ref')).resolves.toEqual({ content: Buffer.from('data') })
+
+    query.mockResolvedValueOnce({ rows: [] })
+    await expect(getMediaBlob('id', 'missing')).resolves.toBeNull()
+  })
+
+  it('updates the account phone only for the claim owner', async () => {
+    query.mockResolvedValueOnce({ rowCount: 1 })
+    await updateConnectionPhone('id', 'token', '972501234567')
+    expect(query.mock.calls[0]![0]).toContain('account_phone_number')
+
+    query.mockResolvedValueOnce({ rowCount: 0 })
+    await expect(updateConnectionPhone('id', 'stale-token', '972501234567'))
+      .rejects.toBeInstanceOf(LostClaimError)
+  })
+
+  it('repoints a row matched by LID to the new canonical id instead of inserting', async () => {
+    clientQuery
+      .mockResolvedValueOnce({})                    // BEGIN
+      .mockResolvedValueOnce({ rowCount: 1 })       // claim check
+      .mockResolvedValueOnce({                      // SELECT: lid-only match
+        rows: [{ canonical_id: 'old-canonical', phone_jid: null, saved_name: 'Saved', push_name: 'Push' }]
+      })
+      .mockResolvedValueOnce({})                    // UPDATE
+      .mockResolvedValueOnce({})                    // COMMIT
+
+    await upsertIdentity('id', 'token', {
+      canonical_id: 'new-canonical',
+      lid: '1234@s.lid',
+      display_name: 'Alice'
+    })
+
+    const updateCall = clientQuery.mock.calls[3]!
+    expect(updateCall[0]).toContain('UPDATE whatsapp_connector.identities')
+    expect(updateCall[1]).toEqual([
+      'id',
+      'new-canonical',
+      '1234@s.lid',
+      null,
+      null,
+      'Alice',
+      'Saved',
+      'old-canonical'
+    ])
+    expect(clientQuery).toHaveBeenLastCalledWith('COMMIT')
+  })
+
+  it('merges rows matched by canonical id and phone jid before updating', async () => {
+    clientQuery
+      .mockResolvedValueOnce({})                    // BEGIN
+      .mockResolvedValueOnce({ rowCount: 1 })       // claim check
+      .mockResolvedValueOnce({                      // SELECT: canonical + phone match distinct rows
+        rows: [
+          { canonical_id: 'alice', phone_jid: 'alice@s.whatsapp.net', saved_name: null, push_name: 'Alice' },
+          { canonical_id: 'bob', phone_jid: 'bob@s.whatsapp.net', saved_name: null, push_name: 'Bob' }
+        ]
+      })
+      .mockResolvedValueOnce({})                    // DELETE merged phone row
+      .mockResolvedValueOnce({})                    // UPDATE
+      .mockResolvedValueOnce({})                    // COMMIT
+
+    await upsertIdentity('id', 'token', {
+      canonical_id: 'alice',
+      phone_jid: 'bob@s.whatsapp.net',
+      phone_number: '972501234567'
+    })
+
+    const deleteCall = clientQuery.mock.calls[3]!
+    expect(deleteCall[0]).toContain('DELETE FROM whatsapp_connector.identities')
+    expect(deleteCall[1]).toEqual(['id', 'bob'])
+
+    const updateCall = clientQuery.mock.calls[4]!
+    expect(updateCall[0]).toContain('UPDATE whatsapp_connector.identities')
+    expect(updateCall[1][7]).toBe('alice')
+    expect(clientQuery).toHaveBeenLastCalledWith('COMMIT')
+  })
+
+  it('rolls back when the state version is not a safe integer', async () => {
+    clientQuery
+      .mockResolvedValueOnce({})                                        // BEGIN
+      .mockResolvedValueOnce({ rows: [{ state_version: 'not-a-number' }] }) // UPDATE ... RETURNING
+    await expect(updateConnectionStatusAndEvent('id', 'token', 'connected'))
+      .rejects.toThrow('invalid state version for connection id')
+    expect(clientQuery).toHaveBeenLastCalledWith('ROLLBACK')
   })
 })
