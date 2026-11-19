@@ -19,10 +19,10 @@ function openaiResponse(content: string) {
 
 const VALID_DIGEST = JSON.stringify({
   attention: false,
-  happened: [{ title: 'שעה שקטה', severity: 'info', detail: 'הכל תקין' }],
+  happened: [{ title: 'Quiet hour', severity: 'info', detail: 'All healthy' }],
   resolved: [],
   still_open: [],
-  one_liner: 'שעה שקטה'
+  one_liner: 'Quiet hour: 7/7 connected, no data loss'
 })
 
 describe('llm digest generation', () => {
@@ -41,6 +41,12 @@ describe('llm digest generation', () => {
     return import('../src/monitor/llm-summarizer.js')
   }
 
+  it('instructs the model to write human-readable fields in English', async () => {
+    const { DIGEST_SYSTEM_PROMPT } = await load()
+    expect(DIGEST_SYSTEM_PROMPT).toContain('English, concise')
+    expect(DIGEST_SYSTEM_PROMPT).not.toContain('Hebrew')
+  })
+
   it('parses a valid model response', async () => {
     fetchMock.mockResolvedValueOnce(openaiResponse(VALID_DIGEST))
     const { generateDigest } = await load()
@@ -57,7 +63,7 @@ describe('llm digest generation', () => {
       previous_digest: null
     })
 
-    expect(digest.one_liner).toBe('שעה שקטה')
+    expect(digest.one_liner).toBe('Quiet hour: 7/7 connected, no data loss')
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const body = JSON.parse(fetchMock.mock.calls[0]![1].body)
     expect(body.model).toBe('gpt-test')
@@ -73,7 +79,7 @@ describe('llm digest generation', () => {
 
     const digest = await generateDigest({} as never)
 
-    expect(digest.one_liner).toBe('שעה שקטה')
+    expect(digest.one_liner).toBe('Quiet hour: 7/7 connected, no data loss')
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 

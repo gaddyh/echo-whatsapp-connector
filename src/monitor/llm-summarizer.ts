@@ -70,8 +70,8 @@ Open an item ONLY for problems worth tracking; do not open items for normal
 activity. severity: high = data loss or users offline; medium = degraded or
 at-risk; low = cosmetic; info = noteworthy normal activity.
 
-Human-readable fields (title, detail, note, one_liner): Hebrew, keeping
-technical terms in English. title max 60 characters, detail max 200 characters.
+Human-readable fields (title, detail, note, one_liner): English, concise and
+technical. title max 60 characters, detail max 200 characters.
 
 Output STRICT JSON only, no markdown, matching:
 { "attention": boolean,
