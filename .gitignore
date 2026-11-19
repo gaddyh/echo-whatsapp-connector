@@ -9,3 +9,4 @@ qr.png
 
 # Devin CLI local permission state (per-machine, not project config)
 .devin/config.local.json
+data/

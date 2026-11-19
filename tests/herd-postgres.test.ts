@@ -1,5 +1,6 @@
 import { exec } from 'node:child_process'
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -120,6 +121,43 @@ let pool: pg.Pool | undefined
 let manager: { restoreAssigned(): Promise<void>; shutdown(): Promise<void> } | undefined
 let minExpiryAfterRamp = new Date(0)
 
+function soakEvent(connectionId: string, id: string): { schema_version: 1; event_type: 'message'; event_id: string; provider: 'baileys'; connection_id: string; chat_id: string; provider_message_id: string; direction: 'inbound'; source: null; timestamp: string; kind: 'text'; text: string; sender: { canonical_id: string; display_name: string }; is_group: boolean } {
+  return {
+    schema_version: 1,
+    event_type: 'message',
+    event_id: `evt-${id}`,
+    provider: 'baileys',
+    connection_id: connectionId,
+    chat_id: 'soak@s.whatsapp.net',
+    provider_message_id: `m-${id}`,
+    direction: 'inbound',
+    source: null,
+    timestamp: new Date().toISOString(),
+    kind: 'text',
+    text: 'soak event',
+    sender: {
+      canonical_id: 'sender@s.whatsapp.net',
+      display_name: 'Sender'
+    },
+    is_group: false
+  }
+}
+
+async function waitForPostgres(timeoutMs = 60_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const probe = new pg.Client({ connectionString: PG_ADMIN_URL })
+      await probe.connect()
+      await probe.end()
+      return
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 1_000))
+    }
+  }
+  throw new Error('postgres did not come back within the soak window')
+}
+
 describe.skipIf(process.env.RUN_HERD_PG !== '1')('L3: herd simulation against real local PostgreSQL', () => {
   beforeAll(async () => {
     fetchLatestWaWebVersion.mockResolvedValue({ version: [2, 3000, 12345], isLatest: true })
@@ -154,6 +192,7 @@ describe.skipIf(process.env.RUN_HERD_PG !== '1')('L3: herd simulation against re
     process.env.RECOVERY_BACKOFF_MAX_MS = '30000'
     process.env.EVENT_SINK = 'db'
     process.env.DOWNLOAD_MEDIA = 'false'
+    process.env.EVENT_OUTBOX_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'herd-outbox-'))
     process.env.BAILEYS_BROWSER_NAME = ''
     process.env.WA_WEB_VERSION_OVERRIDE = ''
 
@@ -307,4 +346,88 @@ describe.skipIf(process.env.RUN_HERD_PG !== '1')('L3: herd simulation against re
     )
     expect(statuses.rows.map(row => row.status)).toEqual(['connecting'])
   }, 60_000)
+
+  it('RC-2: replay after a Postgres commit is a no-op (exactly once)', async (ctx: { skip(): void }) => {
+    if (!pgReady || !pool) return ctx.skip()
+    const { createConnection } = await import('../src/db/repositories.js')
+    const { getOutbox, runOutboxDrain } = await import('../src/events/outbox.js')
+    const { insertEventUnfenced } = await import('../src/events/sink.js')
+    const row = await createConnection()
+    const event = soakEvent(row.id, 'rc2')
+    const outbox = getOutbox()
+
+    // Postgres commits the event; the process "crashes" before the delete.
+    await insertEventUnfenced(event)
+    outbox.append(event)
+    expect(outbox.count()).toBe(1)
+
+    const result = await runOutboxDrain(outbox)
+    expect(result.remaining).toBe(0)
+
+    const inbox = await pool.query(
+      'SELECT count(*)::int AS n FROM whatsapp_connector.event_inbox WHERE connection_id=$1',
+      [row.id]
+    )
+    expect(inbox.rows[0].n).toBe(1)
+  }, 60_000)
+
+  it('RC-4: an event for a deleted connection is an auditable terminal drop', async (ctx: { skip(): void }) => {
+    if (!pgReady || !pool) return ctx.skip()
+    const { getOutbox, runOutboxDrain } = await import('../src/events/outbox.js')
+    const outbox = getOutbox()
+    const event = soakEvent('00000000-0000-0000-0000-000000000000', 'rc4')
+    outbox.append(event)
+
+    const result = await runOutboxDrain(outbox)
+    expect(result.remaining).toBe(0)
+    const inbox = await pool.query(
+      'SELECT count(*)::int AS n FROM whatsapp_connector.event_inbox WHERE connection_id=$1',
+      ['00000000-0000-0000-0000-000000000000']
+    )
+    expect(inbox.rows[0].n).toBe(0)
+  }, 60_000)
+
+  it('PG-outage soak: ingestion continues without loss, then arrives exactly once', async (ctx: { skip(): void }) => {
+    if (!pgReady || !pool) return ctx.skip()
+    const { createConnection } = await import('../src/db/repositories.js')
+    const { getOutbox, runOutboxDrain } = await import('../src/events/outbox.js')
+    const { insertEventUnfenced } = await import('../src/events/sink.js')
+    const row = await createConnection()
+    const outbox = getOutbox()
+    const events = Array.from({ length: 50 }, (_, i) => soakEvent(row.id, `soak-${i}`))
+
+    // The database goes down mid-flow. Idle pooled clients get terminated
+    // by the server shutdown — expected during the intentional outage.
+    pool.on('error', () => {})
+    await promisify(exec)(`docker stop ${CONTAINER_NAME}`)
+
+    // Ingestion continues: every event is durable locally; publish
+    // attempts fast-fail and leave the event in the outbox.
+    let published = 0
+    for (const event of events) {
+      outbox.append(event)
+      try {
+        await insertEventUnfenced(event)
+        outbox.delete(event.connection_id, event.event_id)
+        published++
+      } catch {
+        // left in the outbox — this is the ingestion path during an outage
+      }
+    }
+    expect(published).toBe(0)
+    expect(outbox.count()).toBe(50)
+
+    // The database returns.
+    await promisify(exec)(`docker start ${CONTAINER_NAME}`)
+    await waitForPostgres()
+
+    const result = await runOutboxDrain(outbox)
+    expect(result.remaining).toBe(0)
+
+    const inbox = await pool.query(
+      'SELECT count(*)::int AS n FROM whatsapp_connector.event_inbox WHERE connection_id=$1',
+      [row.id]
+    )
+    expect(inbox.rows[0].n).toBe(50)
+  }, 240_000)
 })

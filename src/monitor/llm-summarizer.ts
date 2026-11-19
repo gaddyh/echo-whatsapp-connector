@@ -51,6 +51,13 @@ Domain knowledge:
 - "auth_lost" = the child's phone removed the device; a human must re-pair.
 - "qr_expired_dormant" = an unpaired connection went dormant by design.
 - "media_no_reference" for @newsletter chats is known and expected.
+- The connector keeps a local write-ahead outbox: publish failures leave
+  events queued for replay (outbox_pending), and the drainer republishes
+  them (outbox_replayed) once the database returns. Pending events
+  persisting across digests, or an oldest pending age above 1 hour, means
+  the database is unhealthy or replay is broken - open an item.
+- outbox_write_failures above zero means local durability itself failed
+  (disk) - high severity.
 - "disconnect_bad_session" churn (WhatsApp's status-stanza rollout) is a
   known upstream issue: sessions drop and reconnect within seconds. Track
   it as an open item only if it grows sharply or message delivery slows.

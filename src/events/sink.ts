@@ -55,3 +55,27 @@ class HttpEventSink implements EventSink {
 }
 
 export const eventSink: EventSink = env.EVENT_SINK === 'http' ? new HttpEventSink() : new DbEventSink()
+
+/**
+ * Unfenced, idempotent insert used by the outbox drainer. The claim
+ * protects who operates a connection; it must not gate replay of an event
+ * that was legitimately captured while the claim was valid. Dedup is by
+ * the (connection_id, event_id) unique constraint — replay is a no-op when
+ * Postgres already committed the row. A 23503 foreign-key violation means
+ * the connection was deleted: the caller treats it as a terminal drop.
+ */
+export async function insertEventUnfenced(event: NormalizedEvent): Promise<void> {
+  await pool.query(
+    `INSERT INTO whatsapp_connector.event_inbox(
+       event_id, connection_id, event_type, provider_message_id, payload)
+     VALUES($1,$2,$3,$4,$5::jsonb)
+     ON CONFLICT(connection_id, event_id) DO NOTHING`,
+    [
+      event.event_id,
+      event.connection_id,
+      event.event_type,
+      event.event_type === 'message' ? event.provider_message_id : null,
+      JSON.stringify(event)
+    ]
+  )
+}

@@ -69,6 +69,10 @@ vi.mock('../src/observability/logger.js', () => ({
 }))
 vi.mock('../src/auth/postgres-auth-state.js', () => ({ createPostgresAuthState }))
 vi.mock('../src/events/sink.js', () => ({ eventSink: { publish: vi.fn() } }))
+vi.mock('../src/events/outbox.js', () => ({
+  getOutbox: () => ({ append: vi.fn((): boolean => true), delete: vi.fn() })
+}))
+vi.mock('../src/events/background-queue.js', () => ({ enqueueBackground: vi.fn() }))
 vi.mock('../src/media/signed-urls.js', () => ({ signedMediaUrl: vi.fn(() => 'http://media.test') }))
 vi.mock('../src/db/repositories.js', () => {
   class LostClaimError extends Error {

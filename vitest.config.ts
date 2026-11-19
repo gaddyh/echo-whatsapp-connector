@@ -16,6 +16,8 @@ export default defineConfig({
         'src/monitor/llm-summarizer.ts',
         'src/monitor/log-monitor.ts',
         'src/observability/log-ring.ts',
+        'src/events/outbox.ts',
+        'src/events/background-queue.ts',
         'src/events/types.ts'
       ],
       exclude: ['**/*.d.ts'],

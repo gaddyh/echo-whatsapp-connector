@@ -39,13 +39,23 @@ const schema = z.object({
   MEDIA_BASE_URL: z.string().url().default('http://localhost:8080'),
   MEDIA_SIGNING_SECRET: z.string().optional().default(''),
   MEDIA_URL_TTL_SECONDS: z.coerce.number().int().positive().default(300),
+  // Write-ahead event outbox: every message event is committed locally
+  // before any publish attempt; a drainer replays leftovers to Postgres.
+  EVENT_OUTBOX_DIR: z.string().default('./data'),
+  EVENT_OUTBOX_MAX_EVENTS: z.coerce.number().int().positive().default(10_000),
+  EVENT_OUTBOX_HARD_MAX_EVENTS: z.coerce.number().int().positive().default(20_000),
+  EVENT_OUTBOX_DRAIN_MS: z.coerce.number().int().positive().default(30_000),
+  PUBLISH_ATTEMPT_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
+  POST_PUBLISH_CONCURRENCY: z.coerce.number().int().positive().default(8),
   // Ops log monitor: hourly LLM-written digest of log-derived counters.
   // The digest is logged and optionally POSTed to OPS_ALERT_ENDPOINT.
   LOG_MONITOR_ENABLED: z.stringbool().default(false),
   LOG_MONITOR_DIGEST_MS: z.coerce.number().int().positive().default(3_600_000),
   OPENAI_API_KEY: z.string().optional().default(''),
   OPENAI_MODEL: z.string().default('gpt-5.6-luna'),
-  OPS_ALERT_ENDPOINT: z.string().optional().default(''),
+  OPS_ALERT_ENDPOINT: z.string().optional().default('').transform(
+    url => (url && !url.includes('://') ? `https://${url}` : url)
+  ),
   OPS_ALERT_TOKEN: z.string().optional().default('')
 })
 
