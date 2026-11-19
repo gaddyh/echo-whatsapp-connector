@@ -27,8 +27,10 @@ const schema = z.object({
   AUTH_ENCRYPTION_KEY: z.string().min(1),
   INTERNAL_API_TOKEN: z.string().min(1),
   WA_WEB_VERSION_OVERRIDE: z.string().optional().default(''),
-  BAILEYS_BROWSER_NAME: z.string().default('Echo Guard'),
-  BAILEYS_BROWSER_PLATFORM: z.string().default('Chrome'),
+  // Fixed browser identity for all connections (legacy/rollback mode).
+  // Empty by default: each connection gets a realistic fingerprint, chosen
+  // once at pairing and persisted in connections.settings.
+  BAILEYS_BROWSER_NAME: z.string().default(''),
   DOWNLOAD_MEDIA: z.stringbool().default(true),
   MAX_MEDIA_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
   EVENT_SINK: z.enum(['db', 'http']).default('db'),

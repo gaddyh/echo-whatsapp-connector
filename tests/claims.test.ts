@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { isBrowserFingerprint } from '../src/baileys/browser-fingerprint.js'
 
 const query = vi.fn()
 const clientQuery = vi.fn()
@@ -13,6 +14,7 @@ const {
   claimConnection,
   createConnection,
   deleteConnectionRow,
+  ensureConnectionBrowser,
   findIdentityName,
   getConnection,
   getGroupSubject,
@@ -273,6 +275,61 @@ describe('connection claims', () => {
       .mockResolvedValueOnce({ rows: [{ state_version: 'not-a-number' }] }) // UPDATE ... RETURNING
     await expect(updateConnectionStatusAndEvent('id', 'token', 'connected'))
       .rejects.toThrow('invalid state version for connection id')
+    expect(clientQuery).toHaveBeenLastCalledWith('ROLLBACK')
+  })
+
+  it('assigns and persists a browser fingerprint on first use', async () => {
+    clientQuery
+      .mockResolvedValueOnce({})                                  // BEGIN
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ settings: {} }] })   // SELECT settings (claim held, no browser yet)
+      .mockResolvedValueOnce({})                                  // UPDATE settings
+      .mockResolvedValueOnce({})                                  // COMMIT
+
+    const fingerprint = await ensureConnectionBrowser('id', 'token')
+
+    expect(isBrowserFingerprint(fingerprint)).toBe(true)
+    const selectCall = clientQuery.mock.calls[1]!
+    expect(selectCall[0]).toContain('claim_token=$2::uuid')
+    expect(selectCall[0]).toContain('FOR UPDATE')
+    const updateCall = clientQuery.mock.calls[2]!
+    expect(updateCall[0]).toContain('settings = settings ||')
+    const persisted = JSON.parse(updateCall[1][1])
+    expect(persisted.browser).toEqual(fingerprint)
+    expect(clientQuery).toHaveBeenLastCalledWith('COMMIT')
+  })
+
+  it('returns the persisted browser fingerprint without writing', async () => {
+    const stored = ['Mac OS', 'Safari', '14.4.1']
+    clientQuery
+      .mockResolvedValueOnce({})                                              // BEGIN
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ settings: { browser: stored } }] })   // SELECT settings
+
+    const fingerprint = await ensureConnectionBrowser('id', 'token')
+
+    expect(fingerprint).toEqual(stored)
+    expect(clientQuery).toHaveBeenCalledTimes(3)
+    expect(clientQuery).toHaveBeenLastCalledWith('COMMIT')
+  })
+
+  it('replaces an invalid stored browser value', async () => {
+    clientQuery
+      .mockResolvedValueOnce({})                                        // BEGIN
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ settings: { browser: 'garbage' } }] }) // SELECT settings
+      .mockResolvedValueOnce({})                                        // UPDATE settings
+      .mockResolvedValueOnce({})                                        // COMMIT
+
+    const fingerprint = await ensureConnectionBrowser('id', 'token')
+
+    expect(isBrowserFingerprint(fingerprint)).toBe(true)
+    expect(JSON.parse(clientQuery.mock.calls[2]![1][1]).browser).toEqual(fingerprint)
+  })
+
+  it('loses the claim when the browser fetch is not fenced', async () => {
+    clientQuery
+      .mockResolvedValueOnce({})                        // BEGIN
+      .mockResolvedValueOnce({ rows: [] })               // SELECT settings (claim mismatch)
+
+    await expect(ensureConnectionBrowser('id', 'stale-token')).rejects.toBeInstanceOf(LostClaimError)
     expect(clientQuery).toHaveBeenLastCalledWith('ROLLBACK')
   })
 })

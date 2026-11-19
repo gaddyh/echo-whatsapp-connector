@@ -7,6 +7,7 @@ const updateConnectionStatus = vi.fn()
 const updateConnectionPhone = vi.fn()
 const createPostgresAuthState = vi.fn()
 const clearAuth = vi.fn()
+const ensureConnectionBrowser = vi.fn()
 const infoLog = vi.fn()
 const eventSinkPublish = vi.fn()
 
@@ -20,22 +21,22 @@ vi.mock('@whiskeysockets/baileys', () => ({
   initAuthCreds: vi.fn()
 }))
 
-vi.mock('../src/config/env.js', () => ({
-  env: {
-    EVENT_SINK: 'db',
-    CLAIM_RENEW_TIMEOUT_MS: 5000,
-    DOWNLOAD_MEDIA: false,
-    BAILEYS_BROWSER_NAME: 'Echo Guard',
-    RECONNECT_BASE_DELAY_MS: 2000,
-    RECONNECT_MAX_DELAY_MS: 60000,
-    QR_TTL_MS: 120000,
-    PAIRING_QR_RECOVERY_MS: 240000,
-    MAX_MEDIA_BYTES: 1024,
-    MEDIA_BASE_URL: 'http://localhost:8080',
-    MEDIA_SIGNING_SECRET: 'test',
-    MEDIA_URL_TTL_SECONDS: 300
-  }
-}))
+const mockEnv: Record<string, unknown> = {
+  EVENT_SINK: 'db',
+  CLAIM_RENEW_TIMEOUT_MS: 5000,
+  DOWNLOAD_MEDIA: false,
+  BAILEYS_BROWSER_NAME: '',
+  RECONNECT_BASE_DELAY_MS: 2000,
+  RECONNECT_MAX_DELAY_MS: 60000,
+  QR_TTL_MS: 120000,
+  PAIRING_QR_RECOVERY_MS: 240000,
+  MAX_MEDIA_BYTES: 1024,
+  MEDIA_BASE_URL: 'http://localhost:8080',
+  MEDIA_SIGNING_SECRET: 'test',
+  MEDIA_URL_TTL_SECONDS: 300
+}
+
+vi.mock('../src/config/env.js', () => ({ env: mockEnv }))
 
 vi.mock('../src/config/process-identity.js', () => ({ INSTANCE_ID: 'instance-a' }))
 vi.mock('../src/observability/logger.js', () => ({
@@ -48,6 +49,7 @@ vi.mock('../src/media/signed-urls.js', () => ({ signedMediaUrl: vi.fn(() => 'htt
 vi.mock('../src/db/repositories.js', () => ({
   getGroupSubject: vi.fn(async () => undefined),
   getMediaBlob: vi.fn(async () => null),
+  ensureConnectionBrowser,
   isRetryableDatabaseError: vi.fn((err: unknown) => (err as { code?: string })?.code === 'ECONNRESET'),
   LostClaimError: class LostClaimError extends Error {},
   saveMediaBlob: vi.fn(),
@@ -80,6 +82,8 @@ describe('Session claim lifecycle', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.resetAllMocks()
+    mockEnv.BAILEYS_BROWSER_NAME = ''
+    ensureConnectionBrowser.mockResolvedValue(['Windows', 'Chrome', '10.0.22631'])
     updateConnectionStatusAndEvent.mockResolvedValue({})
     updateConnectionStatus.mockResolvedValue(undefined)
     renewClaim.mockResolvedValue(true)
@@ -517,5 +521,33 @@ describe('Session claim lifecycle', () => {
 
     expect(onLostClaim).toHaveBeenCalledWith('claim_lost', expect.any(LostClaimError))
     expect(eventSinkPublish).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens sockets with the persisted browser fingerprint', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    ensureConnectionBrowser.mockResolvedValue(['Mac OS', 'Safari', '14.4.1'])
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+
+    await session.start()
+
+    expect(ensureConnectionBrowser).toHaveBeenCalledWith('connection-id', 'claim-token')
+    expect(makeWASocket.mock.calls[0]![0].browser).toEqual(['Mac OS', 'Safari', '14.4.1'])
+    await session.stop()
+  })
+
+  it('uses the fixed browser name from the environment when set', async () => {
+    mockEnv.BAILEYS_BROWSER_NAME = 'Echo Guard'
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+
+    await session.start()
+
+    expect(ensureConnectionBrowser).not.toHaveBeenCalled()
+    expect(makeWASocket.mock.calls[0]![0].browser).toEqual(['Ubuntu', 'Echo Guard', '22.04.4'])
+    await session.stop()
   })
 })

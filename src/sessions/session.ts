@@ -23,6 +23,7 @@ import {
   getGroupSubject,
   getMediaBlob,
   isRetryableDatabaseError,
+  ensureConnectionBrowser,
   LostClaimError,
   saveMediaBlob,
   renewClaim,
@@ -70,6 +71,7 @@ export class Session {
   private apiSentMessageIds = new Set<string>()
   private readonly mediaMessages = new Map<string, WAMessage>()
   private accountPhoneNumber?: string
+  private browser?: [string, string, string]
 
   constructor(
     readonly connectionId: string,
@@ -236,6 +238,15 @@ export class Session {
     if (this.stopped || this.lostClaim) return
     this.auth = await createPostgresAuthState(this.db, this.connectionId, this.claimToken)
     const version = await resolveWaVersion()
+    // The browser identity is part of the device registration, so it is
+    // resolved once per session and kept stable: a persisted realistic
+    // fingerprint, or the fixed BAILEYS_BROWSER_NAME escape hatch.
+    if (!this.browser) {
+      const override = env.BAILEYS_BROWSER_NAME.trim()
+      this.browser = override
+        ? Browsers.ubuntu(override)
+        : await ensureConnectionBrowser(this.connectionId, this.claimToken)
+    }
 
     const sock = makeWASocket({
       version,
@@ -243,7 +254,7 @@ export class Session {
         creds: this.auth.state.creds,
         keys: makeCacheableSignalKeyStore(this.auth.state.keys, logger as any)
       },
-      browser: Browsers.ubuntu(env.BAILEYS_BROWSER_NAME),
+      browser: this.browser,
       logger: logger.child({ connection_id: this.connectionId, component: 'baileys' }) as any,
       syncFullHistory: false,
       markOnlineOnConnect: false,

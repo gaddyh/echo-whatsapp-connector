@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { pool } from './pool.js'
+import { isBrowserFingerprint, pickBrowserFingerprint } from '../baileys/browser-fingerprint.js'
 import {
   connectionStateEventId,
   type ConnectionStatus,
@@ -285,6 +286,50 @@ export async function updateConnectionSettings(id: string, settings: Record<stri
       WHERE id=$1`,
     [id, JSON.stringify(settings)]
   )
+}
+
+/**
+ * Returns the connection's browser fingerprint, assigning and persisting a
+ * realistic one on first use. The fingerprint is part of the device identity
+ * presented at pairing, so it must stay stable for the connection's lifetime:
+ * it is chosen once, stored in connections.settings and never re-rolled.
+ */
+export async function ensureConnectionBrowser(
+  connectionId: string,
+  token: string
+): Promise<[string, string, string]> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const result = await client.query<{ settings: Record<string, unknown> | null }>(
+      `SELECT settings FROM whatsapp_connector.connections
+        WHERE id=$1 AND ${claimPredicate(2)}
+        FOR UPDATE`,
+      [connectionId, token]
+    )
+    if (result.rowCount !== 1) throw new LostClaimError(connectionId)
+
+    const stored = result.rows[0]?.settings?.browser
+    if (isBrowserFingerprint(stored)) {
+      await client.query('COMMIT')
+      return stored
+    }
+
+    const fingerprint = pickBrowserFingerprint()
+    await client.query(
+      `UPDATE whatsapp_connector.connections
+          SET settings = settings || $2::jsonb, updated_at=now()
+        WHERE id=$1`,
+      [connectionId, JSON.stringify({ browser: fingerprint })]
+    )
+    await client.query('COMMIT')
+    return fingerprint
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
 }
 
 export async function deleteConnectionRow(id: string): Promise<void> {
