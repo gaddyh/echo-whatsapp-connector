@@ -16,14 +16,16 @@ const schema = z.object({
   RECOVERY_BACKOFF_INITIAL_MS: z.coerce.number().int().positive().default(1000),
   RECOVERY_BACKOFF_MAX_MS: z.coerce.number().int().positive().default(30000),
   DATABASE_URL: z.string().min(1),
-  DATABASE_SSL: z.coerce.boolean().default(false),
+  // z.stringbool(), not z.coerce.boolean(): Boolean('false') === true, so
+  // coercion silently inverts every explicit "false" in the environment.
+  DATABASE_SSL: z.stringbool().default(false),
   DB_POOL_MAX: z.coerce.number().int().positive().default(25),
   AUTH_ENCRYPTION_KEY: z.string().min(1),
   INTERNAL_API_TOKEN: z.string().min(1),
   WA_WEB_VERSION_OVERRIDE: z.string().optional().default(''),
   BAILEYS_BROWSER_NAME: z.string().default('Echo Guard'),
   BAILEYS_BROWSER_PLATFORM: z.string().default('Chrome'),
-  DOWNLOAD_MEDIA: z.coerce.boolean().default(true),
+  DOWNLOAD_MEDIA: z.stringbool().default(true),
   MAX_MEDIA_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
   EVENT_SINK: z.enum(['db', 'http']).default('db'),
   EVENT_WEBHOOK_URL: z.string().optional().default(''),

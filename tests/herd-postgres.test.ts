@@ -136,9 +136,7 @@ describe.skipIf(process.env.RUN_HERD_PG !== '1')('L3: herd simulation against re
     }
 
     process.env.DATABASE_URL = TEST_DB_URL
-    // NB: z.coerce.boolean() treats the string 'false' as true; only the
-    // empty string coerces to false, so SSL stays off for the local server.
-    process.env.DATABASE_SSL = ''
+    process.env.DATABASE_SSL = 'false'
     process.env.DB_POOL_MAX = '10'
     process.env.AUTH_ENCRYPTION_KEY = Buffer.alloc(32).toString('base64')
     process.env.INTERNAL_API_TOKEN = 'herd-test-token'
