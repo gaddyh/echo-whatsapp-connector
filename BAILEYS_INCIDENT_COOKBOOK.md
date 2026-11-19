@@ -429,7 +429,7 @@ After a deployment, many sessions may reconnect.
 The connector already staggers restored sessions using:
 
 ```env
-SESSION_START_STAGGER_MS=5000
+SESSION_START_STAGGER_MS=2000
 ```
 
 Do not set this to zero in production.
