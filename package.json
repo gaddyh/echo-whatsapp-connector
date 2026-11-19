@@ -12,6 +12,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/app.js",
     "test": "vitest run",
+    "test:herd-pg": "RUN_HERD_PG=1 vitest run tests/herd-postgres.test.ts",
     "coverage": "vitest run --coverage",
     "lint": "eslint .",
     "migrate": "tsx --env-file-if-exists=.env src/db/migrate.ts"
