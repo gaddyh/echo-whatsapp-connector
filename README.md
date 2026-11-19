@@ -116,6 +116,8 @@ Tables are under the dedicated `whatsapp_connector` schema:
 
 The connector owns those tables even when using the same PostgreSQL database as Echo Guard.
 
+Managed PostgreSQL providers such as Render require SSL: set `DATABASE_SSL=true` there. Local docker PostgreSQL does not — set `DATABASE_SSL=false`. Booleans are parsed with `z.stringbool()`, so the words `true`/`false` are honored exactly as written.
+
 ### Why not `useMultiFileAuthState`?
 
 Baileys' own production guidance recommends implementing a proper SQL/NoSQL auth store instead of its multi-file example helper. Keeping auth in Postgres makes workers disposable and enables moving a connection between EC2 instances without copying local directories.
