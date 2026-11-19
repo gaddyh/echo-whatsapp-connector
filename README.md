@@ -177,6 +177,8 @@ whatsapp_connector.event_inbox
 
 Rows are unique on `(connection_id, event_id)` for idempotency. Echo Guard can consume unprocessed rows and set `processed_at`.
 
+A retention sweep runs hourly (`RETENTION_SWEEP_INTERVAL_MS`, 0 disables) and deletes processed events older than `EVENT_RETENTION_DAYS` (7), never-consumed events older than `UNPROCESSED_EVENT_RETENTION_DAYS` (30), and `media_blobs` older than `MEDIA_RETENTION_DAYS` (30). Each rule can be disabled by setting its days to 0.
+
 Optional (`EVENT_SINK=http`): connector posts the same normalized JSON to `EVENT_WEBHOOK_URL` with optional bearer auth. HTTP delivery is guarded by the local session generation, but cannot provide the same atomic fencing guarantee as the database sink.
 
 ## Lease recovery and runtime health

@@ -9,6 +9,7 @@ export default defineConfig({
         'src/baileys/identity.ts',
         'src/baileys/version-provider.ts',
         'src/db/repositories.ts',
+        'src/db/retention.ts',
         'src/events/types.ts'
       ],
       exclude: ['**/*.d.ts'],

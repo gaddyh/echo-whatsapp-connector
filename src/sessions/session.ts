@@ -12,7 +12,7 @@ import { createPostgresAuthState } from '../auth/postgres-auth-state.js'
 import { env } from '../config/env.js'
 import { INSTANCE_ID } from '../config/process-identity.js'
 import { eventSink } from '../events/sink.js'
-import type { ConnectionStatus, NormalizedConnectionEvent } from '../events/types.js'
+import type { ConnectionStatus, NormalizedConnectionEvent, NormalizedMessageEvent } from '../events/types.js'
 import { logger } from '../observability/logger.js'
 import { normalizeMessage, unwrapMessage } from '../baileys/message-normalizer.js'
 import { phoneFromJid } from '../baileys/identity.js'
@@ -179,6 +179,41 @@ export class Session {
         return
       }
       throw err
+    }
+  }
+
+  /**
+   * Publishes a message event with bounded retry: a transient event_inbox
+   * failure (pool wait, connection reset) previously dropped the message
+   * permanently — WhatsApp had already acked it, so nothing redelivers it.
+   * Retries are in-memory only; an outage longer than the retry window still
+   * drops the event, but loudly. Connection-state events are excluded: they
+   * are idempotent and self-heal on the next transition.
+   */
+  private async publishEventWithRetry(event: NormalizedMessageEvent, generation: number): Promise<void> {
+    const retryDelaysMs = [1_000, 2_000, 4_000, 8_000, 16_000]
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await eventSink.publish(event, this.claimToken, () => this.isActive(generation))
+        return
+      } catch (err) {
+        if (err instanceof LostClaimError) {
+          this.loseClaim('claim_lost', err)
+          return
+        }
+        if (attempt >= retryDelaysMs.length || this.stopped || this.lostClaim) {
+          logger.error(
+            { err, connection_id: this.connectionId, event_id: event.event_id, attempts: attempt + 1 },
+            'event publish dropped after retries'
+          )
+          return
+        }
+        logger.warn(
+          { err, connection_id: this.connectionId, event_id: event.event_id, retry_in_ms: retryDelaysMs[attempt] },
+          'event publish failed; retrying'
+        )
+        await new Promise(resolve => setTimeout(resolve, retryDelaysMs[attempt]))
+      }
     }
   }
 
@@ -443,11 +478,7 @@ export class Session {
           }
         }
         if (!this.isActive(generation)) return
-        try { await eventSink.publish(event, this.claimToken, () => this.isActive(generation)) }
-        catch (err) {
-          if (err instanceof LostClaimError) this.loseClaim('claim_lost', err)
-          else logger.error({ err, connection_id: this.connectionId }, 'event publish failed')
-        }
+        await this.publishEventWithRetry(event, generation)
       }
     })
 

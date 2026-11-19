@@ -20,6 +20,10 @@ const schema = z.object({
   // coercion silently inverts every explicit "false" in the environment.
   DATABASE_SSL: z.stringbool().default(false),
   DB_POOL_MAX: z.coerce.number().int().positive().default(25),
+  RETENTION_SWEEP_INTERVAL_MS: z.coerce.number().int().nonnegative().default(3_600_000),
+  EVENT_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(7),
+  UNPROCESSED_EVENT_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(30),
+  MEDIA_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(30),
   AUTH_ENCRYPTION_KEY: z.string().min(1),
   INTERNAL_API_TOKEN: z.string().min(1),
   WA_WEB_VERSION_OVERRIDE: z.string().optional().default(''),
