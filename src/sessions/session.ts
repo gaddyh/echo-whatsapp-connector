@@ -149,6 +149,13 @@ export class Session {
     generation = this.generation,
     force = false
   ): Promise<void> {
+    // State transitions (degraded/disconnect reasons, pairing_required) are
+    // otherwise only written to the DB; mirror them into the log ring so the
+    // hourly ops digest can count disconnect reasons directly.
+    logger.info(
+      { connection_id: this.connectionId, status, raw_status: raw ?? null },
+      'connection state changed'
+    )
     if (!force && !this.isActive(generation)) return
     try {
       if (env.EVENT_SINK === 'db') {

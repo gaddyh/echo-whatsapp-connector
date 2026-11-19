@@ -51,6 +51,12 @@ Domain knowledge:
 - "auth_lost" = the child's phone removed the device; a human must re-pair.
 - "qr_expired_dormant" = an unpaired connection went dormant by design.
 - "media_no_reference" for @newsletter chats is known and expected.
+- "disconnect_bad_session" churn (WhatsApp's status-stanza rollout) is a
+  known upstream issue: sessions drop and reconnect within seconds. Track
+  it as an open item only if it grows sharply or message delivery slows.
+- "disconnect_version_mismatch" (WhatsApp Web version rejected, 405) IS a
+  version incident — many users failing together needs the
+  WA_WEB_VERSION_OVERRIDE runbook.
 - retention_sweeps delete old event_inbox/media_blobs rows - deleting rows is
   success, not data loss.
 

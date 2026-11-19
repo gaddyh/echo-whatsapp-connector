@@ -102,6 +102,24 @@ describe('log window counters', () => {
     expect(summary.counters.recovery_scheduled).toBe(1)
   })
 
+  it('counts disconnect reasons from connection state transitions', () => {
+    const summary = summarizeWindow([
+      entry('connection state changed', { connection_id: 'c1', status: 'degraded', raw_status: 'disconnect:500' }),
+      entry('connection state changed', { connection_id: 'c1', status: 'degraded', raw_status: 'disconnect:500' }),
+      entry('connection state changed', { connection_id: 'c2', status: 'degraded', raw_status: 'disconnect:428' }),
+      entry('connection state changed', { connection_id: 'c3', status: 'degraded', raw_status: 'disconnect:405' }),
+      entry('connection state changed', { connection_id: 'c4', status: 'degraded', raw_status: 'disconnect:503' }),
+      entry('connection state changed', { connection_id: 'c5', status: 'degraded', raw_status: 'disconnect:unknown' }),
+      entry('connection state changed', { connection_id: 'c6', status: 'connecting', raw_status: 'opening_socket' }),
+      entry('connection state changed', { connection_id: 'c7', status: 'connected', raw_status: 'open' })
+    ])
+    expect(summary.counters.state_degraded).toBe(6)
+    expect(summary.counters.disconnect_bad_session).toBe(2)
+    expect(summary.counters.disconnect_server_closed).toBe(1)
+    expect(summary.counters.disconnect_version_mismatch).toBe(1)
+    expect(summary.counters.disconnect_unavailable).toBe(1)
+  })
+
   it('deduplicates warn/error samples and redacts them', () => {
     const summary = summarizeWindow([
       entry('media message has no media_reference — mediaKey missing', { connection_id: 'aaaaaaaa-bbbb', kind: 'image' }, 40),
