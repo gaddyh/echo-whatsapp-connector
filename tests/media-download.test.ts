@@ -27,7 +27,7 @@ vi.mock('../src/config/env.js', () => ({
     EVENT_SINK: 'db',
     CLAIM_RENEW_TIMEOUT_MS: 5000,
     DOWNLOAD_MEDIA: true,
-    BAILEYS_BROWSER_NAME: 'Echo Guard',
+    BAILEYS_BROWSER_NAME: '',
     RECONNECT_BASE_DELAY_MS: 2000,
     RECONNECT_MAX_DELAY_MS: 60000,
     QR_TTL_MS: 120000,
@@ -51,6 +51,7 @@ vi.mock('../src/media/signed-urls.js', () => ({ signedMediaUrl: vi.fn(() => 'htt
 vi.mock('../src/db/repositories.js', () => ({
   getGroupSubject: vi.fn(async () => undefined),
   getMediaBlob,
+  ensureConnectionBrowser: vi.fn(async () => ['Windows', 'Chrome', '10.0.22631']),
   isRetryableDatabaseError: vi.fn((err: unknown) => (err as { code?: string })?.code === 'ECONNRESET'),
   LostClaimError: class LostClaimError extends Error {},
   saveMediaBlob,

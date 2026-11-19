@@ -27,7 +27,11 @@ const makeWASocket = vi.fn()
 const fetchLatestWaWebVersion = vi.fn()
 
 vi.mock('@whiskeysockets/baileys', () => ({
-  Browsers: { ubuntu: vi.fn(() => ['Ubuntu', 'Echo Guard', '22.04.4']) },
+  Browsers: {
+    ubuntu: vi.fn((name: string) => ['Ubuntu', name, '22.04.4']),
+    macOS: vi.fn((name: string) => ['Mac OS', name, '14.4.1']),
+    windows: vi.fn((name: string) => ['Windows', name, '10.0.22631'])
+  },
   DisconnectReason: { loggedOut: 401 },
   makeCacheableSignalKeyStore: vi.fn((keys: unknown) => keys),
   makeWASocket: (...args: unknown[]) => makeWASocket(...args),
@@ -150,7 +154,7 @@ describe.skipIf(process.env.RUN_HERD_PG !== '1')('L3: herd simulation against re
     process.env.RECOVERY_BACKOFF_MAX_MS = '30000'
     process.env.EVENT_SINK = 'db'
     process.env.DOWNLOAD_MEDIA = 'false'
-    process.env.BAILEYS_BROWSER_NAME = 'Echo Guard'
+    process.env.BAILEYS_BROWSER_NAME = ''
     process.env.WA_WEB_VERSION_OVERRIDE = ''
 
     const managerModule = await import('../src/sessions/session-manager.js')
@@ -203,6 +207,15 @@ describe.skipIf(process.env.RUN_HERD_PG !== '1')('L3: herd simulation against re
       ['herd-worker']
     )
     expect(claims.rows[0].n).toBe(CONNECTION_COUNT)
+
+    // The weighted fingerprint palette assigns several distinct browser
+    // identities across 100 connections.
+    const fingerprints = await pool.query(
+      `SELECT count(DISTINCT settings->'browser')::int AS n
+         FROM whatsapp_connector.connections WHERE worker_id=$1`,
+      ['herd-worker']
+    )
+    expect(fingerprints.rows[0].n).toBeGreaterThanOrEqual(2)
 
     const inbox = await pool.query('SELECT count(*)::int AS n FROM whatsapp_connector.event_inbox')
     expect(inbox.rows[0].n).toBeGreaterThanOrEqual(CONNECTION_COUNT)

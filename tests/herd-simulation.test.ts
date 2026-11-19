@@ -40,7 +40,7 @@ const mockEnv = {
   EVENT_SINK: 'db',
   CLAIM_RENEW_TIMEOUT_MS: 5000,
   DOWNLOAD_MEDIA: false,
-  BAILEYS_BROWSER_NAME: 'Echo Guard',
+  BAILEYS_BROWSER_NAME: '',
   QR_TTL_MS: 120000,
   PAIRING_QR_RECOVERY_MS: 240000,
   MAX_MEDIA_BYTES: 1024,
@@ -83,6 +83,7 @@ vi.mock('../src/db/repositories.js', () => {
     claimConnection: (...args: unknown[]) => claimConnection(...args),
     createConnection: vi.fn(),
     deleteConnectionRow: vi.fn(),
+    ensureConnectionBrowser: vi.fn(async () => ['Windows', 'Chrome', '10.0.22631']),
     findIdentityName: vi.fn(),
     getConnection: (...args: unknown[]) => getConnection(...args),
     getGroupSubject: vi.fn(async () => undefined),
@@ -216,7 +217,10 @@ describe('herd simulation at 100 connections', () => {
         const bucket = Math.floor((entry.openedAt - rampStart) / 100)
         rampBuckets.set(bucket, (rampBuckets.get(bucket) ?? 0) + 1)
       }
-      expect(Math.max(...rampBuckets.values())).toBeLessThanOrEqual(8)
+      // Expected ~5 per bucket (1 per 20ms stagger); the ceiling tolerates
+      // timer bunching when the runner executes files in parallel workers.
+      // A reconnect storm would put dozens in one bucket.
+      expect(Math.max(...rampBuckets.values())).toBeLessThanOrEqual(10)
 
       const massDisconnectAt = Date.now()
       for (const entry of sockets.slice(0, 100)) {
