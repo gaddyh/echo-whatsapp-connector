@@ -42,6 +42,7 @@ vi.mock('../src/observability/logger.js', () => ({
 }))
 vi.mock('../src/sessions/session.js', () => {
   class Session {
+    runtimeState = 'starting'
     start = vi.fn(async () => {})
     stop = vi.fn(async () => {})
     constructor(
@@ -213,5 +214,13 @@ describe('SessionManager herding controls', () => {
     await sessionManager.start('c1')
     await expect(sessionManager.start('c2')).rejects.toThrow('worker session capacity reached')
     expect(claimConnection).toHaveBeenCalledTimes(1)
+  })
+
+  it('exposes an in-memory runtime state snapshot', async () => {
+    const sessionManager = await load()
+
+    await sessionManager.start('c1')
+
+    expect(sessionManager.runtimeSnapshot()).toEqual({ starting: 1 })
   })
 })

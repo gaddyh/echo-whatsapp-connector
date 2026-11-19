@@ -335,6 +335,10 @@ For the first 20–100 Guard users:
 
 This scaffold does **not** implement distributed worker claiming yet. `worker_id` is persisted and sessions assigned to the current `WORKER_ID` are restored. Before running multiple workers that can dynamically take ownership of the same connection, add a DB advisory lock or Redis lease so exactly one live process can own a WhatsApp session.
 
+## Ops log monitor
+
+With `LOG_MONITOR_ENABLED=true`, the connector tees its structured logs into a bounded in-memory ring and, every `LOG_MONITOR_DIGEST_MS` (default 1h), sends aggregated counters plus redacted warn/error samples to an LLM (`OPENAI_MODEL`, default `gpt-5.6-luna`) that writes an hourly digest: what happened, what resolved from the previous hour, and what is still open. The digest is logged (`component: 'log-monitor'`) and, when `OPS_ALERT_ENDPOINT` is set, POSTed there (`{severity, title, body, source, worker_id, timestamp}` with Bearer `OPS_ALERT_TOKEN`) — e.g. to an echo-v2 ops-alert bridge that relays it to WhatsApp. The LLM only ever sees redacted aggregates: phone numbers masked, connection ids truncated, JIDs stripped; a model or delivery failure falls back to a locally rendered digest so the heartbeat never goes silent.
+
 ## Browser fingerprint
 
 Each connection presents a realistic browser identity (weighted palette: Chrome/Edge/Firefox/Safari across Windows/macOS/Linux), chosen once at pairing and persisted in `connections.settings` — it never changes for the life of the connection, so a fleet naturally becomes a mixture of pairing-time vintages like a real device population. In the child's WhatsApp "Linked devices" screen the connector therefore appears as e.g. "Chrome on Windows" rather than a fixed product name. Set `BAILEYS_BROWSER_NAME` to force the legacy single fixed identity for all connections (rollback/testing). Note that a name which is not a real browser (like a product name) registers with WhatsApp as `OTHER_WEB_CLIENT`, which real WhatsApp Web populations do not use — which is why the palette uses genuine browser names.

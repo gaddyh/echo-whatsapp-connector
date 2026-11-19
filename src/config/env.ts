@@ -38,7 +38,15 @@ const schema = z.object({
   EVENT_WEBHOOK_TOKEN: z.string().optional().default(''),
   MEDIA_BASE_URL: z.string().url().default('http://localhost:8080'),
   MEDIA_SIGNING_SECRET: z.string().optional().default(''),
-  MEDIA_URL_TTL_SECONDS: z.coerce.number().int().positive().default(300)
+  MEDIA_URL_TTL_SECONDS: z.coerce.number().int().positive().default(300),
+  // Ops log monitor: hourly LLM-written digest of log-derived counters.
+  // The digest is logged and optionally POSTed to OPS_ALERT_ENDPOINT.
+  LOG_MONITOR_ENABLED: z.stringbool().default(false),
+  LOG_MONITOR_DIGEST_MS: z.coerce.number().int().positive().default(3_600_000),
+  OPENAI_API_KEY: z.string().optional().default(''),
+  OPENAI_MODEL: z.string().default('gpt-5.6-luna'),
+  OPS_ALERT_ENDPOINT: z.string().optional().default(''),
+  OPS_ALERT_TOKEN: z.string().optional().default('')
 })
 
 export type Env = z.infer<typeof schema>

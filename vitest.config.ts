@@ -11,6 +11,11 @@ export default defineConfig({
         'src/baileys/version-provider.ts',
         'src/db/repositories.ts',
         'src/db/retention.ts',
+        'src/monitor/counters.ts',
+        'src/monitor/redact.ts',
+        'src/monitor/llm-summarizer.ts',
+        'src/monitor/log-monitor.ts',
+        'src/observability/log-ring.ts',
         'src/events/types.ts'
       ],
       exclude: ['**/*.d.ts'],

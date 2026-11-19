@@ -37,3 +37,12 @@ Stagger session startups after worker restart to avoid reconnect storms.
 
 ## Scope discipline
 Do not add generic bot-platform features, marketing automation, Kubernetes, proxy rotation, or Guard analyzer logic to this repo.
+
+## Ops log monitor
+The connector includes a strictly isolated ops log monitor: a bounded in-memory
+ring of its own structured logs, deterministic counters, and an hourly
+LLM-written digest that is logged and optionally POSTed to the ops-alert
+endpoint. It must never block or crash the transport path, its failures only
+log and retry on the next interval, and only redacted data (no phone numbers,
+no full connection ids, no message content) may leave the process toward the
+LLM or the alert endpoint.

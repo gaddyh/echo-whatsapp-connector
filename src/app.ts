@@ -7,6 +7,7 @@ import { runRetentionSweep } from './db/retention.js'
 import { logger } from './observability/logger.js'
 import { registerRoutes } from './api/routes.js'
 import { sessionManager } from './sessions/session-manager.js'
+import { startLogMonitor, stopLogMonitor } from './monitor/log-monitor.js'
 
 const app = Fastify({ loggerInstance: logger as unknown as FastifyBaseLogger })
 await app.register(sensible)
@@ -23,6 +24,7 @@ const shutdown = async (signal: string) => {
   shuttingDown = true
   logger.info({ signal }, 'shutting down')
   if (retentionTimer) clearInterval(retentionTimer)
+  stopLogMonitor()
   await sessionManager.shutdown()
   await app.close()
   await pool.end()
@@ -34,5 +36,6 @@ process.on('SIGINT', () => void shutdown('SIGINT'))
 
 await pool.query('SELECT 1')
 await sessionManager.restoreAssigned()
+if (env.LOG_MONITOR_ENABLED) startLogMonitor()
 await app.listen({ host: env.HOST, port: env.PORT })
 logger.info({ port: env.PORT, worker_id: env.WORKER_ID, instance_id: INSTANCE_ID }, 'connector started')
