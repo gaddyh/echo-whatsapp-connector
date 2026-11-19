@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { Browsers } from '@whiskeysockets/baileys'
+import {
+  Browsers,
+  buildPairingQRData,
+  Curve,
+  generateRegistrationNode,
+  getCompanionPlatformId,
+  proto
+} from '@whiskeysockets/baileys'
 import { isBrowserFingerprint, pickBrowserFingerprint } from '../src/baileys/browser-fingerprint.js'
 
 /** Names Baileys maps to real WhatsApp web client types; anything else becomes OTHER_WEB_CLIENT. */
@@ -41,5 +48,43 @@ describe('browser fingerprint palette', () => {
     expect(isBrowserFingerprint(['Windows', 'Chrome'])).toBe(false)
     expect(isBrowserFingerprint(['Windows', 'Chrome', 42])).toBe(false)
     expect(isBrowserFingerprint(['', 'Chrome', '1.0'])).toBe(false)
+  })
+
+  it('registers every palette entry as a real web client type, never OTHER_WEB_CLIENT', () => {
+    for (const entry of PALETTE_ENTRIES) {
+      const fingerprint = JSON.parse(entry) as [string, string, string]
+      expect(getCompanionPlatformId(fingerprint)).not.toBe('9')
+    }
+  })
+
+  it('round-trips every palette entry through the real registration protobuf', () => {
+    const identity = Curve.generateKeyPair()
+    const preKey = Curve.generateKeyPair()
+    const creds = {
+      registrationId: 1234,
+      signedIdentityKey: identity,
+      signedPreKey: { keyId: 7, keyPair: preKey, signature: Buffer.alloc(64) }
+    }
+    for (const entry of PALETTE_ENTRIES) {
+      const fingerprint = JSON.parse(entry) as [string, string, string]
+      const node = generateRegistrationNode(creds as never, {
+        version: [2, 3000, 1234567],
+        browser: fingerprint,
+        syncFullHistory: false
+      } as never) as { devicePairingData?: { deviceProps?: Uint8Array } }
+
+      // The real DeviceProps protobuf encodes our tuple; decode it back and
+      // verify the OS and platform type survive the actual registration path.
+      const propsBuffer = node.devicePairingData?.deviceProps
+      expect(propsBuffer).toBeTruthy()
+      const deviceProps = proto.DeviceProps.decode(propsBuffer!)
+      expect(deviceProps.os).toBe(fingerprint[0])
+      const platformTypeEnum = proto.DeviceProps.PlatformType as unknown as Record<string, number>
+      expect(deviceProps.platformType).toBe(platformTypeEnum[fingerprint[1].toUpperCase()])
+
+      // The pairing QR carries the same web client type.
+      const qr = buildPairingQRData('ref', 'k1', 'k2', 'k3', fingerprint)
+      expect(qr.endsWith(`,${getCompanionPlatformId(fingerprint)}`)).toBe(true)
+    }
   })
 })
