@@ -527,6 +527,30 @@ describe('Session claim lifecycle', () => {
     expect(outboxDelete).not.toHaveBeenCalled()
   })
 
+  it('contains an outbox append failure: the event still publishes (RC-9)', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    outboxAppend.mockImplementation(() => {
+      throw new Error('EACCES: permission denied')
+    })
+    outboxDelete.mockImplementation(() => {
+      throw new Error('EACCES: permission denied')
+    })
+    eventSinkPublish.mockResolvedValueOnce(undefined)
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+
+    await session.start()
+    // Must not throw out of the handler — an outbox failure can never
+    // crash the ingestion path.
+    await expect(
+      fixture.handlers.get('messages.upsert')!({ messages: [textMessage()], type: 'notify' })
+    ).resolves.toBeUndefined()
+
+    expect(eventSinkPublish).toHaveBeenCalledOnce()
+    await session.stop()
+  })
+
   it('times out a hanging publish and leaves the event in the outbox', async () => {
     const fixture = socketFixture()
     makeWASocket.mockReturnValue(fixture.socket)

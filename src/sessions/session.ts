@@ -210,7 +210,13 @@ export class Session {
     })
     try {
       await Promise.race([attempt, timeout])
-      getOutbox().delete(event.connection_id, event.event_id)
+      try {
+        getOutbox().delete(event.connection_id, event.event_id)
+      } catch (err) {
+        // A lingering outbox row is harmless — replay dedups — but a
+        // broken outbox must never fail the publish path.
+        logger.warn({ err, connection_id: this.connectionId, event_id: event.event_id }, 'outbox delete failed; row will replay as a no-op')
+      }
     } catch (err) {
       if (err instanceof LostClaimError) {
         // The event is already durable; the drainer replays it unfenced
@@ -411,7 +417,16 @@ export class Session {
         // Everything below publishes from the outbox or runs as bounded
         // background enrichment that never mutates the event and never
         // blocks ingestion of the next message.
-        if (!getOutbox().append(event)) {
+        let appended = false
+        try {
+          appended = getOutbox().append(event)
+        } catch (err) {
+          logger.error(
+            { err, connection_id: this.connectionId, event_id: event.event_id },
+            'outbox append failed; event accepted WITHOUT local durability'
+          )
+        }
+        if (!appended) {
           logger.error(
             { connection_id: this.connectionId, event_id: event.event_id },
             'event accepted WITHOUT outbox durability; attempting direct publish'

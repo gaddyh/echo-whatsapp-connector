@@ -38,29 +38,33 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         timer.unref()
       })
     ])
-    if (!databaseReachable) {
-      req.log.error({ worker_id: env.WORKER_ID }, 'health check failed: database unreachable')
+    // The outbox is informational: a broken outbox must never fail the
+    // health probe, which reports database reachability.
+    let outboxStats: Record<string, number> | undefined
+    try {
       const outbox = getOutbox()
-      return reply.code(503).send({
-        status: 'unhealthy',
-        database: 'unreachable',
-        worker_id: env.WORKER_ID,
-        // The outbox keeps ingesting during the outage — its depth is the
-        // recovery backlog. Exposed on the failure path too so an operator
-        // (or an alert rule) can see ingestion is buffered, not lost.
-        outbox: { pending: outbox.count(), oldest_age_seconds: outbox.oldestAgeSeconds() }
-      })
-    }
-    const outbox = getOutbox()
-    return {
-      status: 'ok',
-      worker_id: env.WORKER_ID,
-      outbox: {
+      outboxStats = {
         pending: outbox.count(),
         oldest_age_seconds: outbox.oldestAgeSeconds(),
         disk_bytes: outbox.diskBytes()
       }
+    } catch (err) {
+      req.log.error({ err, worker_id: env.WORKER_ID }, 'outbox unavailable; health reports database only')
     }
+    if (!databaseReachable) {
+      req.log.error({ worker_id: env.WORKER_ID }, 'health check failed: database unreachable')
+      return reply.code(503).send({
+        status: 'unhealthy',
+        database: 'unreachable',
+        worker_id: env.WORKER_ID,
+        // During an outage the outbox keeps ingesting — its depth is the
+        // recovery backlog, so an operator can see ingestion is buffered.
+        outbox: outboxStats
+          ? { pending: outboxStats.pending, oldest_age_seconds: outboxStats.oldest_age_seconds }
+          : undefined
+      })
+    }
+    return { status: 'ok', worker_id: env.WORKER_ID, outbox: outboxStats }
   })
 
   app.get('/media/:connectionId/:reference', async (req, reply) => {
