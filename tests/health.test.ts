@@ -14,6 +14,12 @@ vi.mock('../src/config/env.js', () => ({
 }))
 vi.mock('../src/config/process-identity.js', () => ({ INSTANCE_ID: 'instance-a' }))
 vi.mock('../src/db/pool.js', () => ({ pool: { query: (...args: unknown[]) => poolQuery(...args) } }))
+const outboxMock = vi.hoisted(() => ({
+  count: vi.fn(() => 0),
+  oldestAgeSeconds: vi.fn(() => 0),
+  diskBytes: vi.fn(() => 1024)
+}))
+vi.mock('../src/events/outbox.js', () => ({ getOutbox: () => outboxMock }))
 vi.mock('../src/db/repositories.js', () => ({ updateConnectionSettings: vi.fn() }))
 vi.mock('../src/sessions/session-manager.js', () => ({ sessionManager: {} }))
 vi.mock('../src/media/signed-urls.js', () => ({
@@ -34,12 +40,18 @@ describe('health endpoint', () => {
     return app
   }
 
-  it('returns ok without authentication when the database responds', async () => {
+  it('returns ok with live outbox stats when the database responds', async () => {
     poolQuery.mockResolvedValue({ rows: [{ ok: 1 }] })
+    outboxMock.count.mockReturnValueOnce(3)
+    outboxMock.oldestAgeSeconds.mockReturnValueOnce(42)
     const app = await buildApp()
     const res = await app.inject({ method: 'GET', url: '/health' })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ status: 'ok', worker_id: 'worker-a' })
+    expect(res.json()).toEqual({
+      status: 'ok',
+      worker_id: 'worker-a',
+      outbox: { pending: 3, oldest_age_seconds: 42, disk_bytes: 1024 }
+    })
     await app.close()
   })
 
@@ -48,7 +60,11 @@ describe('health endpoint', () => {
     const app = await buildApp()
     const res = await app.inject({ method: 'GET', url: '/health' })
     expect(res.statusCode).toBe(503)
-    expect(res.json()).toEqual({ status: 'unhealthy', database: 'unreachable', worker_id: 'worker-a' })
+    expect(res.json()).toMatchObject({
+      status: 'unhealthy',
+      database: 'unreachable',
+      outbox: { pending: 0, oldest_age_seconds: 0 }
+    })
     await app.close()
   })
 
