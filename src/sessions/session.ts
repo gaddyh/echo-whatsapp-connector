@@ -518,6 +518,32 @@ export class Session {
       return
     }
 
+    // A never-paired connection whose pairing QR refs ran out has nothing to
+    // reconnect to: retrying would re-register and re-emit a QR nobody scans,
+    // forever. Go dormant as pairing_required (auth preserved) until pairing
+    // is requested again through the pairing endpoints. Authenticated
+    // sessions never take this branch — their creds.me is always set.
+    if (statusCode === DisconnectReason.timedOut && this.auth?.state.creds.me === undefined) {
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer)
+        this.reconnectTimer = undefined
+      }
+      logger.info(
+        { event: 'reconnect.qr_expired', connection_id: this.connectionId, status_code: statusCode },
+        'never-paired connection exhausted its pairing QR refs; going dormant'
+      )
+      await this.publishState('pairing_required', 'qr_expired', undefined, generation)
+      if (!this.isActive(generation)) return
+      this.generation += 1
+      try { this.sock?.end(undefined) } catch { /* best effort */ }
+      this.sock = undefined
+      this.socketUsable = false
+      this.runtime = 'stopped'
+      this.qr = undefined
+      this.qrIssuedAt = undefined
+      return
+    }
+
     this.runtime = 'degraded'
     await this.publishState(
       'degraded',

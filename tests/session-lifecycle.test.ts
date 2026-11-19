@@ -11,7 +11,7 @@ const infoLog = vi.fn()
 
 vi.mock('@whiskeysockets/baileys', () => ({
   Browsers: { ubuntu: vi.fn(() => ['Ubuntu', 'Echo Guard', '22.04.4']) },
-  DisconnectReason: { loggedOut: 401 },
+  DisconnectReason: { loggedOut: 401, timedOut: 428 },
   makeCacheableSignalKeyStore: vi.fn((keys: unknown) => keys),
   makeWASocket,
   downloadContentFromMessage: vi.fn(),
@@ -347,6 +347,92 @@ describe('Session claim lifecycle', () => {
       expect(makeWASocket).toHaveBeenCalledTimes(callsBefore + 1)
       current = fixtures[++currentIndex]!
     }
+  })
+
+  it('goes dormant as pairing_required when a never-paired connection exhausts its QR refs', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+
+    await session.start()
+    await fixture.handlers.get('connection.update')!({ qr: 'stale-qr' })
+    expect(session.latestQr).toBe('stale-qr')
+
+    await fixture.handlers.get('connection.update')!({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 428 } } }
+    })
+
+    expect(updateConnectionStatusAndEvent).toHaveBeenLastCalledWith(
+      'connection-id',
+      'claim-token',
+      'pairing_required',
+      'qr_expired',
+      undefined
+    )
+    expect(session.runtimeState).toBe('stopped')
+    expect(session.latestQr).toBeUndefined()
+    expect(clearAuth).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(makeWASocket).toHaveBeenCalledOnce()
+  })
+
+  it('keeps reconnecting a paired connection on the same timeout code', async () => {
+    const fixtures = [socketFixture(), socketFixture()]
+    let fixtureIndex = 0
+    makeWASocket.mockImplementation(() => fixtures[fixtureIndex++]!.socket)
+    createPostgresAuthState.mockResolvedValue({
+      state: { creds: { me: { id: '972500000000:2@s.whatsapp.net' }, registered: true }, keys: {} },
+      saveCreds: vi.fn(),
+      clear: clearAuth
+    })
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+
+    await session.start()
+    await fixtures[0]!.handlers.get('connection.update')!({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 428 } } }
+    })
+
+    expect(updateConnectionStatusAndEvent).toHaveBeenLastCalledWith(
+      'connection-id',
+      'claim-token',
+      'degraded',
+      'disconnect:428',
+      'disconnect:428'
+    )
+    await vi.advanceTimersByTimeAsync(1_999)
+    expect(makeWASocket).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(makeWASocket).toHaveBeenCalledTimes(2)
+    expect(clearAuth).not.toHaveBeenCalled()
+  })
+
+  it('revives a qr_expired connection on demand without clearing auth', async () => {
+    const first = socketFixture()
+    const second = socketFixture()
+    makeWASocket.mockReturnValueOnce(first.socket).mockReturnValueOnce(second.socket)
+    createPostgresAuthState
+      .mockResolvedValueOnce({ state: { creds: { registered: false }, keys: {} }, clear: clearAuth, saveCreds: vi.fn() })
+      .mockResolvedValueOnce({ state: { creds: { registered: false }, keys: {} }, clear: clearAuth, saveCreds: vi.fn() })
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+
+    await session.start()
+    await first.handlers.get('connection.update')!({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 428 } } }
+    })
+    expect(clearAuth).not.toHaveBeenCalled()
+
+    await session.preparePairing()
+    expect(makeWASocket).toHaveBeenCalledTimes(2)
+    await second.handlers.get('connection.update')!({ qr: 'fresh-qr' })
+    expect(session.latestQr).toBe('fresh-qr')
+    await session.stop()
   })
 
   it('spreads reconnect retries below the base delay on low jitter draws', async () => {
