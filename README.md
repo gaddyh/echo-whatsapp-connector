@@ -236,6 +236,8 @@ Possible response:
 
 or `already_authorized` / `timeout`.
 
+A connection that was never paired and exhausts its pairing QR refs goes dormant as `pairing_required` (`qr_expired`) instead of cycling re-registration forever. It is revived on demand by the pairing endpoints above; auth state is preserved.
+
 ### Pair with phone-number code
 
 ```http

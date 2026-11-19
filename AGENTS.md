@@ -30,7 +30,7 @@ Persist both credentials and all Signal key categories. Encrypt auth payloads be
 ## Session safety
 Exactly one live Baileys socket may own a connection at a time.
 Never clear auth state on transient disconnects, version incompatibility, 408/428/515, or process restart.
-Only mark `PAIRING_REQUIRED` / clear auth after an explicit logged-out/device-removed condition or an operator-requested unpair/delete.
+Only mark `PAIRING_REQUIRED` / clear auth after an explicit logged-out/device-removed condition, an operator-requested unpair/delete, or a never-paired connection exhausting its pairing QR refs (`qr_expired`: auth is preserved, no reconnect is scheduled, and the pairing endpoints revive it on demand).
 
 ## Restart behavior
 Stagger session startups after worker restart to avoid reconnect storms.
