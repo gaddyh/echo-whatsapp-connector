@@ -7,6 +7,7 @@ export default defineConfig({
       include: [
         'src/auth/crypto.ts',
         'src/baileys/identity.ts',
+        'src/baileys/version-provider.ts',
         'src/db/repositories.ts',
         'src/events/types.ts'
       ],
