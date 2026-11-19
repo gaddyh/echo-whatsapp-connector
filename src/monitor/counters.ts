@@ -62,6 +62,11 @@ function zeroCounters(): Record<string, number> {
     retention_rows_deleted: 0,
     retention_failures: 0,
     identity_upsert_failures: 0,
+    state_degraded: 0,
+    disconnect_bad_session: 0,
+    disconnect_version_mismatch: 0,
+    disconnect_server_closed: 0,
+    disconnect_unavailable: 0,
     http_requests: 0,
     http_5xx: 0,
     http_4xx: 0
@@ -169,6 +174,15 @@ export function summarizeWindow(entries: RingEntry[]): WindowSummary {
         if (statusCode === 500 || statusCode === 502 || statusCode === 503) bump(summary, 'http_5xx', entry)
         else if (typeof statusCode === 'number' && statusCode >= 400) bump(summary, 'http_4xx', entry)
       }
+    }
+
+    if (msg === 'connection state changed' && entry.status === 'degraded') {
+      bump(summary, 'state_degraded', entry)
+      const rawStatus = typeof entry.raw_status === 'string' ? entry.raw_status : ''
+      if (rawStatus === 'disconnect:500') bump(summary, 'disconnect_bad_session', entry)
+      else if (rawStatus === 'disconnect:405') bump(summary, 'disconnect_version_mismatch', entry)
+      else if (rawStatus === 'disconnect:428') bump(summary, 'disconnect_server_closed', entry)
+      else if (rawStatus === 'disconnect:503') bump(summary, 'disconnect_unavailable', entry)
     }
 
     if (entry.level >= 40) collectSample(summary, entry)
