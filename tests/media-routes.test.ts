@@ -16,6 +16,9 @@ vi.mock('../src/config/process-identity.js', () => ({ INSTANCE_ID: 'instance-a' 
 vi.mock('../src/db/pool.js', () => ({ pool: {} }))
 vi.mock('../src/db/repositories.js', () => ({ updateConnectionSettings: vi.fn() }))
 vi.mock('../src/sessions/session-manager.js', () => ({ sessionManager: { downloadMedia } }))
+vi.mock('../src/events/outbox.js', () => ({
+  getOutbox: () => ({ count: () => 0, oldestAgeSeconds: () => 0, diskBytes: () => 0 })
+}))
 
 // signed-urls is mocked with controllable functions.
 const signedMediaUrlMock = vi.fn(() => 'http://media.test')

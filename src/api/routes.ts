@@ -5,6 +5,7 @@ import { pool } from '../db/pool.js'
 import { updateConnectionSettings } from '../db/repositories.js'
 import { MediaDownloadError, MediaPayloadIncompleteError, MediaTooLargeError } from '../media/errors.js'
 import { sessionManager } from '../sessions/session-manager.js'
+import { getOutbox } from '../events/outbox.js'
 import { signedMediaUrl, verifyMediaSignature } from '../media/signed-urls.js'
 
 const HEALTH_DB_TIMEOUT_MS = 2_000
@@ -39,9 +40,27 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     ])
     if (!databaseReachable) {
       req.log.error({ worker_id: env.WORKER_ID }, 'health check failed: database unreachable')
-      return reply.code(503).send({ status: 'unhealthy', database: 'unreachable', worker_id: env.WORKER_ID })
+      const outbox = getOutbox()
+      return reply.code(503).send({
+        status: 'unhealthy',
+        database: 'unreachable',
+        worker_id: env.WORKER_ID,
+        // The outbox keeps ingesting during the outage — its depth is the
+        // recovery backlog. Exposed on the failure path too so an operator
+        // (or an alert rule) can see ingestion is buffered, not lost.
+        outbox: { pending: outbox.count(), oldest_age_seconds: outbox.oldestAgeSeconds() }
+      })
     }
-    return { status: 'ok', worker_id: env.WORKER_ID }
+    const outbox = getOutbox()
+    return {
+      status: 'ok',
+      worker_id: env.WORKER_ID,
+      outbox: {
+        pending: outbox.count(),
+        oldest_age_seconds: outbox.oldestAgeSeconds(),
+        disk_bytes: outbox.diskBytes()
+      }
+    }
   })
 
   app.get('/media/:connectionId/:reference', async (req, reply) => {
