@@ -62,6 +62,9 @@ function zeroCounters(): Record<string, number> {
     retention_rows_deleted: 0,
     retention_failures: 0,
     identity_upsert_failures: 0,
+    outbox_replayed: 0,
+    outbox_pending: 0,
+    outbox_write_failures: 0,
     state_degraded: 0,
     disconnect_bad_session: 0,
     disconnect_version_mismatch: 0,
@@ -183,6 +186,12 @@ export function summarizeWindow(entries: RingEntry[]): WindowSummary {
       else if (rawStatus === 'disconnect:405') bump(summary, 'disconnect_version_mismatch', entry)
       else if (rawStatus === 'disconnect:428') bump(summary, 'disconnect_server_closed', entry)
       else if (rawStatus === 'disconnect:503') bump(summary, 'disconnect_unavailable', entry)
+    }
+
+    if (msg === 'outbox drained' && entry.component === 'outbox') {
+      summary.counters.outbox_replayed = (summary.counters.outbox_replayed ?? 0) +
+        (typeof entry.replayed === 'number' ? entry.replayed : 0)
+      summary.counters.outbox_pending = typeof entry.remaining === 'number' ? entry.remaining : 0
     }
 
     if (entry.level >= 40) collectSample(summary, entry)

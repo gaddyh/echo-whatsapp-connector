@@ -47,6 +47,11 @@ vi.mock('../src/observability/logger.js', () => ({
 vi.mock('../src/auth/postgres-auth-state.js', () => ({ createPostgresAuthState }))
 vi.mock('../src/baileys/version-provider.js', () => ({ resolveWaVersion: vi.fn(async () => [2, 3000, 1]) }))
 vi.mock('../src/events/sink.js', () => ({ eventSink: { publish: vi.fn() } }))
+vi.mock('../src/events/outbox.js', () => ({
+  getOutbox: () => ({ append: vi.fn((): boolean => true), delete: vi.fn() })
+}))
+const enqueueBackgroundMock = vi.hoisted(() => vi.fn())
+vi.mock('../src/events/background-queue.js', () => ({ enqueueBackground: enqueueBackgroundMock }))
 vi.mock('../src/media/signed-urls.js', () => ({ signedMediaUrl: vi.fn(() => 'http://media.test') }))
 vi.mock('../src/db/repositories.js', () => ({
   getGroupSubject: vi.fn(async () => undefined),
@@ -432,16 +437,25 @@ describe('Session media download', () => {
     await session.stop()
   })
 
-  it('drops the in-memory copy after an ingested media message is persisted', async () => {
+  it('warms media in the background after the event is durable', async () => {
     const fixture = socketFixture()
     makeWASocket.mockReturnValue(fixture.socket)
     downloadContentFromMessage.mockResolvedValue(asyncStream([Buffer.from('video-bytes')]))
+    enqueueBackgroundMock.mockClear()
 
     const { Session } = await import('../src/sessions/session.js')
     const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
     await session.start()
 
     await fixture.handlers.get('messages.upsert')!({ messages: [videoMessage()], type: 'notify' })
+
+    // Ingestion did not download inline: warming is bounded background work.
+    const warmCall = enqueueBackgroundMock.mock.calls.find(c => c[0] === 'media-warm')
+    expect(warmCall).toBeDefined()
+    expect(saveMediaBlob).not.toHaveBeenCalled()
+    expect((session as any).mediaMessages.has('baileys:connection-id:video-id')).toBe(true)
+
+    await warmCall![1]()
 
     expect(saveMediaBlob).toHaveBeenCalledWith(
       'connection-id', 'claim-token', 'baileys:connection-id:video-id',
@@ -451,18 +465,22 @@ describe('Session media download', () => {
     await session.stop()
   })
 
-  it('keeps the in-memory copy for a later retry when ingestion persistence fails', async () => {
+  it('keeps the in-memory copy when background media warming fails', async () => {
     const fixture = socketFixture()
     makeWASocket.mockReturnValue(fixture.socket)
     downloadContentFromMessage.mockResolvedValue(asyncStream([Buffer.from('video-bytes')]))
     saveMediaBlob.mockRejectedValueOnce(new Error('db down'))
+    enqueueBackgroundMock.mockClear()
 
     const { Session } = await import('../src/sessions/session.js')
     const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
     await session.start()
 
     await fixture.handlers.get('messages.upsert')!({ messages: [videoMessage()], type: 'notify' })
+    const warmCall = enqueueBackgroundMock.mock.calls.find(c => c[0] === 'media-warm')
+    await warmCall![1]()
 
+    // The failure is contained: the on-demand path can still fetch later.
     expect((session as any).mediaMessages.has('baileys:connection-id:video-id')).toBe(true)
     await session.stop()
   })

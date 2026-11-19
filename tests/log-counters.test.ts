@@ -120,6 +120,15 @@ describe('log window counters', () => {
     expect(summary.counters.disconnect_unavailable).toBe(1)
   })
 
+  it('counts outbox drain metrics from the drain summary line', () => {
+    const summary = summarizeWindow([
+      entry('outbox drained', { component: 'outbox', replayed: 7, remaining: 2 }, 30),
+      entry('outbox drained', { component: 'outbox', replayed: 2, remaining: 0 }, 30, T + 60_000)
+    ])
+    expect(summary.counters.outbox_replayed).toBe(9)
+    expect(summary.counters.outbox_pending).toBe(0)
+  })
+
   it('deduplicates warn/error samples and redacts them', () => {
     const summary = summarizeWindow([
       entry('media message has no media_reference — mediaKey missing', { connection_id: 'aaaaaaaa-bbbb', kind: 'image' }, 40),

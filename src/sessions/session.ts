@@ -12,6 +12,8 @@ import { createPostgresAuthState } from '../auth/postgres-auth-state.js'
 import { env } from '../config/env.js'
 import { INSTANCE_ID } from '../config/process-identity.js'
 import { eventSink } from '../events/sink.js'
+import { getOutbox } from '../events/outbox.js'
+import { enqueueBackground } from '../events/background-queue.js'
 import type { ConnectionStatus, NormalizedConnectionEvent, NormalizedMessageEvent } from '../events/types.js'
 import { logger } from '../observability/logger.js'
 import { normalizeMessage, unwrapMessage } from '../baileys/message-normalizer.js'
@@ -70,6 +72,8 @@ export class Session {
   private runtime: SessionRuntimeState = 'starting'
   private apiSentMessageIds = new Set<string>()
   private readonly mediaMessages = new Map<string, WAMessage>()
+  /** In-memory group-name cache: zero-I/O enrichment read pre-append. */
+  private readonly groupNames = new Map<string, string>()
   private accountPhoneNumber?: string
   private browser?: [string, string, string]
 
@@ -192,37 +196,34 @@ export class Session {
   }
 
   /**
-   * Publishes a message event with bounded retry: a transient event_inbox
-   * failure (pool wait, connection reset) previously dropped the message
-   * permanently — WhatsApp had already acked it, so nothing redelivers it.
-   * Retries are in-memory only; an outage longer than the retry window still
-   * drops the event, but loudly. Connection-state events are excluded: they
-   * are idempotent and self-heal on the next transition.
+   * Single bounded publish attempt. The event is already durable in the
+   * outbox; on any failure it stays there and the drainer replays it, so
+   * no retry loop runs on the ingestion path — ingestion must never wait
+   * out a database outage (durability is not ingestion capacity).
    */
-  private async publishEventWithRetry(event: NormalizedMessageEvent, generation: number): Promise<void> {
-    const retryDelaysMs = [1_000, 2_000, 4_000, 8_000, 16_000]
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await eventSink.publish(event, this.claimToken, () => this.isActive(generation))
+  private async publishEvent(event: NormalizedMessageEvent, generation: number): Promise<void> {
+    const attempt = eventSink.publish(event, this.claimToken, () => this.isActive(generation))
+    let timer: NodeJS.Timeout | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('publish attempt timed out')), env.PUBLISH_ATTEMPT_TIMEOUT_MS)
+      timer.unref()
+    })
+    try {
+      await Promise.race([attempt, timeout])
+      getOutbox().delete(event.connection_id, event.event_id)
+    } catch (err) {
+      if (err instanceof LostClaimError) {
+        // The event is already durable; the drainer replays it unfenced
+        // once a new claim exists. Claim loss no longer loses the event.
+        this.loseClaim('claim_lost', err)
         return
-      } catch (err) {
-        if (err instanceof LostClaimError) {
-          this.loseClaim('claim_lost', err)
-          return
-        }
-        if (attempt >= retryDelaysMs.length || this.stopped || this.lostClaim) {
-          logger.error(
-            { err, connection_id: this.connectionId, event_id: event.event_id, attempts: attempt + 1 },
-            'event publish dropped after retries'
-          )
-          return
-        }
-        logger.warn(
-          { err, connection_id: this.connectionId, event_id: event.event_id, retry_in_ms: retryDelaysMs[attempt] },
-          'event publish failed; retrying'
-        )
-        await new Promise(resolve => setTimeout(resolve, retryDelaysMs[attempt]))
       }
+      logger.warn(
+        { err, connection_id: this.connectionId, event_id: event.event_id },
+        'event publish failed; left in outbox for replay'
+      )
+    } finally {
+      if (timer) clearTimeout(timer)
     }
   }
 
@@ -393,78 +394,6 @@ export class Session {
         }
         if (event.media_reference) {
           this.rememberMediaMessage(event.media_reference, msg)
-          if (env.DOWNLOAD_MEDIA) {
-            try {
-              // Diagnostic: snapshot the unwrapped message structure to
-              // understand why mediaKey is sometimes missing at download time
-              // despite the normalizer finding it.
-              const rawForDiag = unwrapMessage(msg.message) as Record<string, any>
-              const mediaKeys = Object.keys(rawForDiag).filter(k => k.endsWith('Message'))
-              const diagFields: Record<string, unknown> = {}
-              for (const mk of mediaKeys) {
-                const c = rawForDiag[mk]
-                if (c && typeof c === 'object') {
-                  diagFields[mk] = {
-                    has_mediaKey: c.mediaKey != null,
-                    has_url: !!c.url,
-                    has_directPath: !!c.directPath,
-                    has_encFilehash: !!c.encFilehash,
-                    has_mediaKeyTimestamp: c.mediaKeyTimestamp != null,
-                    mimetype: c.mimetype,
-                  }
-                }
-              }
-              logger.info(
-                {
-                  connection_id: this.connectionId,
-                  media_reference: event.media_reference,
-                  kind: event.kind,
-                  mime: event.media_mime_type,
-                  unwrapped_message_types: mediaKeys,
-                  diag_fields: diagFields,
-                  has_msg_message: !!msg.message,
-                  msg_message_keys: msg.message ? Object.keys(msg.message) : null,
-                },
-                'media ingestion download start'
-              )
-              const media = await this.downloadMediaMessage(msg)
-              logger.info(
-                { connection_id: this.connectionId, media_reference: event.media_reference, bytes: media.bytes.length },
-                'media ingestion download succeeded'
-              )
-              await saveMediaBlob(
-                this.connectionId,
-                this.claimToken,
-                event.media_reference,
-                media.bytes,
-                media.mimeType,
-                media.fileName
-              )
-              event.media_size = media.bytes.length
-              // The blob is persisted; the in-memory copy is redundant.
-              this.mediaMessages.delete(event.media_reference)
-              logger.info(
-                { connection_id: this.connectionId, media_reference: event.media_reference },
-                'media ingestion blob persisted'
-              )
-            } catch (err) {
-              if (err instanceof LostClaimError) {
-                this.loseClaim('claim_lost', err)
-              } else {
-                logger.warn(
-                  {
-                    err,
-                    connection_id: this.connectionId,
-                    media_reference: event.media_reference,
-                    kind: event.kind,
-                    error_name: err instanceof Error ? err.name : typeof err,
-                    error_message: err instanceof Error ? err.message : String(err),
-                  },
-                  'media ingestion download or persistence failed'
-                )
-              }
-            }
-          }
           event.media_download_url = signedMediaUrl(
             this.connectionId,
             event.media_reference
@@ -474,29 +403,71 @@ export class Session {
           event.source = 'api'
           this.apiSentMessageIds.delete(event.provider_message_id)
         }
-        if (event.sender) {
-          try { await upsertIdentity(this.connectionId, this.claimToken, event.sender) }
-          catch (err) {
-            if (err instanceof LostClaimError) this.loseClaim('claim_lost', err)
-            else logger.warn({ err, connection_id: this.connectionId }, 'identity upsert failed')
-          }
-        }
         if (event.is_group) {
-          try {
-            let subject = await getGroupSubject(this.connectionId, event.chat_id)
-            if (!subject && this.sock) {
-              const meta = await this.sock.groupMetadata(event.chat_id)
-              subject = meta?.subject
-              if (subject) await upsertGroup(this.connectionId, this.claimToken, event.chat_id, subject, meta?.owner)
-            }
-            if (subject) event.chat_name = subject
-          } catch (err) {
-            if (err instanceof LostClaimError) this.loseClaim('claim_lost', err)
-            else logger.warn({ err, connection_id: this.connectionId, chat_id: event.chat_id }, 'group subject lookup failed')
-          }
+          const cachedName = this.groupNames.get(event.chat_id)
+          if (cachedName) event.chat_name = cachedName
+        }
+        // Write-ahead: the event is FINAL and locally durable from here.
+        // Everything below publishes from the outbox or runs as bounded
+        // background enrichment that never mutates the event and never
+        // blocks ingestion of the next message.
+        if (!getOutbox().append(event)) {
+          logger.error(
+            { connection_id: this.connectionId, event_id: event.event_id },
+            'event accepted WITHOUT outbox durability; attempting direct publish'
+          )
         }
         if (!this.isActive(generation)) return
-        await this.publishEventWithRetry(event, generation)
+        await this.publishEvent(event, generation)
+        const sender = event.sender
+        if (sender) {
+          enqueueBackground('identity-upsert', async () => {
+            try { await upsertIdentity(this.connectionId, this.claimToken, sender) }
+            catch (err) {
+              if (err instanceof LostClaimError) this.loseClaim('claim_lost', err)
+              else logger.warn({ err, connection_id: this.connectionId }, 'identity upsert failed')
+            }
+          })
+        }
+        if (event.is_group && !event.chat_name) {
+          enqueueBackground('group-subject-warm', async () => {
+            try {
+              let subject = await getGroupSubject(this.connectionId, event.chat_id)
+              if (!subject && this.sock) {
+                const meta = await this.sock.groupMetadata(event.chat_id)
+                subject = meta?.subject
+                if (subject) await upsertGroup(this.connectionId, this.claimToken, event.chat_id, subject, meta?.owner)
+              }
+              if (subject) this.groupNames.set(event.chat_id, subject)
+            } catch (err) {
+              if (err instanceof LostClaimError) this.loseClaim('claim_lost', err)
+              else logger.warn({ err, connection_id: this.connectionId, chat_id: event.chat_id }, 'group subject lookup failed')
+            }
+          })
+        }
+        const mediaReference = event.media_reference
+        if (mediaReference && env.DOWNLOAD_MEDIA) {
+          enqueueBackground('media-warm', async () => {
+            try {
+              const media = await this.downloadMediaMessage(msg)
+              await saveMediaBlob(
+                this.connectionId,
+                this.claimToken,
+                mediaReference,
+                media.bytes,
+                media.mimeType,
+                media.fileName
+              )
+              this.mediaMessages.delete(mediaReference)
+            } catch (err) {
+              if (err instanceof LostClaimError) this.loseClaim('claim_lost', err)
+              else logger.warn(
+                { err, connection_id: this.connectionId, media_reference: mediaReference },
+                'media warming download or persistence failed'
+              )
+            }
+          })
+        }
       }
     })
 
@@ -524,6 +495,7 @@ export class Session {
 
     sock.ev.on('groups.upsert', async groups => {
       for (const g of groups as any[]) {
+        if (g.id && g.subject) this.groupNames.set(g.id, g.subject)
         try { await upsertGroup(this.connectionId, this.claimToken, g.id, g.subject, g.ownerPn ?? g.owner) }
         catch (err) {
           if (err instanceof LostClaimError) this.loseClaim('claim_lost', err)
@@ -535,6 +507,7 @@ export class Session {
     sock.ev.on('groups.update', async groups => {
       for (const g of groups as any[]) {
         if (!g.id) continue
+        if (g.subject) this.groupNames.set(g.id, g.subject)
         try { await upsertGroup(this.connectionId, this.claimToken, g.id, g.subject, g.owner ?? undefined) }
         catch (err) {
           if (err instanceof LostClaimError) this.loseClaim('claim_lost', err)
