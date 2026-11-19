@@ -3,6 +3,7 @@ import sensible from '@fastify/sensible'
 import { env } from './config/env.js'
 import { INSTANCE_ID } from './config/process-identity.js'
 import { pool } from './db/pool.js'
+import { runRetentionSweep } from './db/retention.js'
 import { logger } from './observability/logger.js'
 import { registerRoutes } from './api/routes.js'
 import { sessionManager } from './sessions/session-manager.js'
@@ -12,10 +13,16 @@ await app.register(sensible)
 await registerRoutes(app)
 
 let shuttingDown = false
+const retentionTimer = env.RETENTION_SWEEP_INTERVAL_MS > 0
+  ? setInterval(() => { void runRetentionSweep() }, env.RETENTION_SWEEP_INTERVAL_MS)
+  : undefined
+retentionTimer?.unref()
+
 const shutdown = async (signal: string) => {
   if (shuttingDown) return
   shuttingDown = true
   logger.info({ signal }, 'shutting down')
+  if (retentionTimer) clearInterval(retentionTimer)
   await sessionManager.shutdown()
   await app.close()
   await pool.end()

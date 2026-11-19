@@ -8,6 +8,7 @@ const updateConnectionPhone = vi.fn()
 const createPostgresAuthState = vi.fn()
 const clearAuth = vi.fn()
 const infoLog = vi.fn()
+const eventSinkPublish = vi.fn()
 
 vi.mock('@whiskeysockets/baileys', () => ({
   Browsers: { ubuntu: vi.fn(() => ['Ubuntu', 'Echo Guard', '22.04.4']) },
@@ -42,7 +43,7 @@ vi.mock('../src/observability/logger.js', () => ({
 }))
 vi.mock('../src/auth/postgres-auth-state.js', () => ({ createPostgresAuthState }))
 vi.mock('../src/baileys/version-provider.js', () => ({ resolveWaVersion: vi.fn(async () => [2, 3000, 1]) }))
-vi.mock('../src/events/sink.js', () => ({ eventSink: { publish: vi.fn() } }))
+vi.mock('../src/events/sink.js', () => ({ eventSink: { publish: eventSinkPublish } }))
 vi.mock('../src/media/signed-urls.js', () => ({ signedMediaUrl: vi.fn(() => 'http://media.test') }))
 vi.mock('../src/db/repositories.js', () => ({
   getGroupSubject: vi.fn(async () => undefined),
@@ -65,6 +66,14 @@ function socketFixture() {
     end: vi.fn()
   }
   return { socket, handlers }
+}
+
+function textMessage(id = 'msg-1') {
+  return {
+    key: { id, remoteJid: '15551234567@s.whatsapp.net', fromMe: false },
+    message: { conversation: 'hello' },
+    messageTimestamp: 1700000000
+  } as any
 }
 
 describe('Session claim lifecycle', () => {
@@ -455,5 +464,58 @@ describe('Session claim lifecycle', () => {
     expect(makeWASocket).toHaveBeenCalledOnce()
     await vi.advanceTimersByTimeAsync(1)
     expect(makeWASocket).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries a failed message publish through backoff until it succeeds', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    eventSinkPublish
+      .mockRejectedValueOnce(new Error('pool wait'))
+      .mockRejectedValueOnce(new Error('connection reset'))
+      .mockResolvedValueOnce(undefined)
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+
+    await session.start()
+    const processing = fixture.handlers.get('messages.upsert')!({ messages: [textMessage()], type: 'notify' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(eventSinkPublish).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(eventSinkPublish).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(2_000)
+    await processing
+    expect(eventSinkPublish).toHaveBeenCalledTimes(3)
+    await session.stop()
+  })
+
+  it('drops a message publish after exhausting retries', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    eventSinkPublish.mockRejectedValue(new Error('db down'))
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', vi.fn())
+
+    await session.start()
+    const processing = fixture.handlers.get('messages.upsert')!({ messages: [textMessage()], type: 'notify' })
+    await vi.advanceTimersByTimeAsync(31_000)
+    await processing
+    expect(eventSinkPublish).toHaveBeenCalledTimes(6)
+    await session.stop()
+  })
+
+  it('stops retrying and loses the claim when publish reports a lost claim', async () => {
+    const fixture = socketFixture()
+    makeWASocket.mockReturnValue(fixture.socket)
+    const { LostClaimError } = await import('../src/db/repositories.js')
+    eventSinkPublish.mockRejectedValue(new LostClaimError('connection-id'))
+    const onLostClaim = vi.fn()
+    const { Session } = await import('../src/sessions/session.js')
+    const session = new Session('connection-id', {} as any, 'claim-token', onLostClaim)
+
+    await session.start()
+    await fixture.handlers.get('messages.upsert')!({ messages: [textMessage()], type: 'notify' })
+
+    expect(onLostClaim).toHaveBeenCalledWith('claim_lost', expect.any(LostClaimError))
+    expect(eventSinkPublish).toHaveBeenCalledTimes(1)
   })
 })

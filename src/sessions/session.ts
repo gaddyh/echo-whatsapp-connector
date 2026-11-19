@@ -12,7 +12,7 @@ import { createPostgresAuthState } from '../auth/postgres-auth-state.js'
 import { env } from '../config/env.js'
 import { INSTANCE_ID } from '../config/process-identity.js'
 import { eventSink } from '../events/sink.js'
-import type { ConnectionStatus, NormalizedConnectionEvent } from '../events/types.js'
+import type { ConnectionStatus, NormalizedConnectionEvent, NormalizedMessageEvent } from '../events/types.js'
 import { logger } from '../observability/logger.js'
 import { normalizeMessage, unwrapMessage } from '../baileys/message-normalizer.js'
 import { phoneFromJid } from '../baileys/identity.js'
@@ -34,6 +34,13 @@ import {
 } from '../db/repositories.js'
 
 const RECONNECT_JITTER_RATIO = 0.25
+
+/**
+ * Bounds the in-memory lookback of messages kept for on-demand media fetches.
+ * Entries are dropped after their blob is persisted; unfetched entries are
+ * evicted oldest-first at this cap so the map cannot grow unboundedly.
+ */
+const MEDIA_MESSAGE_CACHE_MAX = 100
 
 /** Bounded backoff (ms) for transient WhatsApp media download failures. */
 const MEDIA_RETRY_DELAYS_MS = [0, 2_000, 5_000]
@@ -172,6 +179,41 @@ export class Session {
         return
       }
       throw err
+    }
+  }
+
+  /**
+   * Publishes a message event with bounded retry: a transient event_inbox
+   * failure (pool wait, connection reset) previously dropped the message
+   * permanently — WhatsApp had already acked it, so nothing redelivers it.
+   * Retries are in-memory only; an outage longer than the retry window still
+   * drops the event, but loudly. Connection-state events are excluded: they
+   * are idempotent and self-heal on the next transition.
+   */
+  private async publishEventWithRetry(event: NormalizedMessageEvent, generation: number): Promise<void> {
+    const retryDelaysMs = [1_000, 2_000, 4_000, 8_000, 16_000]
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await eventSink.publish(event, this.claimToken, () => this.isActive(generation))
+        return
+      } catch (err) {
+        if (err instanceof LostClaimError) {
+          this.loseClaim('claim_lost', err)
+          return
+        }
+        if (attempt >= retryDelaysMs.length || this.stopped || this.lostClaim) {
+          logger.error(
+            { err, connection_id: this.connectionId, event_id: event.event_id, attempts: attempt + 1 },
+            'event publish dropped after retries'
+          )
+          return
+        }
+        logger.warn(
+          { err, connection_id: this.connectionId, event_id: event.event_id, retry_in_ms: retryDelaysMs[attempt] },
+          'event publish failed; retrying'
+        )
+        await new Promise(resolve => setTimeout(resolve, retryDelaysMs[attempt]))
+      }
     }
   }
 
@@ -332,7 +374,7 @@ export class Session {
           )
         }
         if (event.media_reference) {
-          this.mediaMessages.set(event.media_reference, msg)
+          this.rememberMediaMessage(event.media_reference, msg)
           if (env.DOWNLOAD_MEDIA) {
             try {
               // Diagnostic: snapshot the unwrapped message structure to
@@ -381,6 +423,8 @@ export class Session {
                 media.fileName
               )
               event.media_size = media.bytes.length
+              // The blob is persisted; the in-memory copy is redundant.
+              this.mediaMessages.delete(event.media_reference)
               logger.info(
                 { connection_id: this.connectionId, media_reference: event.media_reference },
                 'media ingestion blob persisted'
@@ -434,11 +478,7 @@ export class Session {
           }
         }
         if (!this.isActive(generation)) return
-        try { await eventSink.publish(event, this.claimToken, () => this.isActive(generation)) }
-        catch (err) {
-          if (err instanceof LostClaimError) this.loseClaim('claim_lost', err)
-          else logger.error({ err, connection_id: this.connectionId }, 'event publish failed')
-        }
+        await this.publishEventWithRetry(event, generation)
       }
     })
 
@@ -615,6 +655,14 @@ export class Session {
     return await this.sock!.requestPairingCode(phoneNumber.replace(/\D/g, ''))
   }
 
+  private rememberMediaMessage(reference: string, msg: WAMessage): void {
+    if (this.mediaMessages.size >= MEDIA_MESSAGE_CACHE_MAX && !this.mediaMessages.has(reference)) {
+      const oldest = this.mediaMessages.keys().next()
+      if (!oldest.done) this.mediaMessages.delete(oldest.value)
+    }
+    this.mediaMessages.set(reference, msg)
+  }
+
   async downloadMedia(reference: string): Promise<{ bytes: Buffer; mimeType?: string; fileName?: string }> {
     logger.info({ connection_id: this.connectionId, reference }, 'on-demand media download start')
     const stored = await getMediaBlob(this.connectionId, reference)
@@ -648,6 +696,7 @@ export class Session {
         media.mimeType,
         media.fileName
       )
+      this.mediaMessages.delete(reference)
     } catch (err) {
       if (err instanceof LostClaimError) {
         this.loseClaim('claim_lost', err)
