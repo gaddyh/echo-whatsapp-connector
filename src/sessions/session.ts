@@ -529,7 +529,14 @@ export class Session {
       env.RECONNECT_MAX_DELAY_MS,
       env.RECONNECT_BASE_DELAY_MS * 2 ** Math.min(this.reconnectAttempt++, 8)
     )
-    const delay = Math.floor(base * (1 - RECONNECT_JITTER_RATIO * Math.random()))
+    // Jitter spreads around the base so a mass reconnect scatters instead of
+    // bunching just below it; the cap applies after jitter to stay bounded.
+    const delay = Math.floor(
+      Math.min(
+        env.RECONNECT_MAX_DELAY_MS,
+        base * (1 + RECONNECT_JITTER_RATIO * (2 * Math.random() - 1))
+      )
+    )
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined
       if (!this.stopped && !this.lostClaim) void this.openSocket().catch(err => {
