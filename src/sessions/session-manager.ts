@@ -270,6 +270,15 @@ export class SessionManager {
     return rows.map(row => this.runtimeStatus(row))
   }
 
+  /** In-memory session counts by runtime state; no database access. */
+  runtimeSnapshot(): Record<string, number> {
+    const counts: Record<string, number> = {}
+    for (const session of this.sessions.values()) {
+      counts[session.runtimeState] = (counts[session.runtimeState] ?? 0) + 1
+    }
+    return counts
+  }
+
   async preparePairing(connectionId: string) {
     const row = await getConnection(connectionId)
     if (!row) throw new Error('connection not found')
