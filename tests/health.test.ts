@@ -19,7 +19,8 @@ const outboxMock = vi.hoisted(() => ({
   oldestAgeSeconds: vi.fn(() => 0),
   diskBytes: vi.fn(() => 1024)
 }))
-vi.mock('../src/events/outbox.js', () => ({ getOutbox: () => outboxMock }))
+const getOutboxMock = vi.hoisted(() => vi.fn(() => outboxMock))
+vi.mock('../src/events/outbox.js', () => ({ getOutbox: getOutboxMock }))
 vi.mock('../src/db/repositories.js', () => ({ updateConnectionSettings: vi.fn() }))
 vi.mock('../src/sessions/session-manager.js', () => ({ sessionManager: {} }))
 vi.mock('../src/media/signed-urls.js', () => ({
@@ -65,6 +66,18 @@ describe('health endpoint', () => {
       database: 'unreachable',
       outbox: { pending: 0, oldest_age_seconds: 0 }
     })
+    await app.close()
+  })
+
+  it('stays ok when the outbox itself is unavailable', async () => {
+    poolQuery.mockResolvedValue({ rows: [{ ok: 1 }] })
+    getOutboxMock.mockImplementationOnce(() => {
+      throw new Error('EACCES: permission denied, mkdir ./data')
+    })
+    const app = await buildApp()
+    const res = await app.inject({ method: 'GET', url: '/health' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ status: 'ok', worker_id: 'worker-a', outbox: undefined })
     await app.close()
   })
 
