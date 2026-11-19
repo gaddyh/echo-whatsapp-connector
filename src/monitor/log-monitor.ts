@@ -45,7 +45,7 @@ export function buildDigestPayload(
   } as DigestPayload
 }
 
-async function postDigest(digest: DigestOutput, windowTo: string): Promise<void> {
+async function postDigest(digest: DigestOutput, payload: DigestPayload): Promise<void> {
   try {
     const response = await fetch(env.OPS_ALERT_ENDPOINT, {
       method: 'POST',
@@ -59,7 +59,16 @@ async function postDigest(digest: DigestOutput, windowTo: string): Promise<void>
         body: JSON.stringify(digest),
         source: 'connector',
         worker_id: env.WORKER_ID,
-        timestamp: windowTo
+        timestamp: payload.window.to,
+        window: payload.window,
+        metrics: {
+          counters: payload.counters,
+          peak_recovery_per_min: payload.peak_recovery_per_min,
+          distinct_connections: payload.distinct_connections,
+          by_connection_anomalous: payload.by_connection_anomalous,
+          warn_error_samples: payload.warn_error_samples,
+          log_entries: payload.log_entries
+        }
       })
     })
     if (!response.ok) throw new Error(`ops alert endpoint returned HTTP ${response.status}`)
@@ -84,7 +93,7 @@ export async function runDigest(context: DigestContext): Promise<DigestOutput> {
   const digest = await generateDigest(payload)
   previousDigest = digest
   logger.info({ component: 'log-monitor', digest }, 'hourly log digest')
-  if (env.OPS_ALERT_ENDPOINT) await postDigest(digest, new Date(now).toISOString())
+  if (env.OPS_ALERT_ENDPOINT) await postDigest(digest, payload)
   return digest
 }
 
