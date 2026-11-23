@@ -1,0 +1,13 @@
+-- Drop the legacy untyped partial index on event_inbox. The new
+-- ix_event_inbox_unprocessed_typed (event_type, received_at, id)
+-- covers both claim polls; the legacy (received_at) partial index is
+-- only write overhead on every connector INSERT. Removal is gated on
+-- the typed index being verified indisvalid=true in production.
+--
+-- Exactly one statement in this file, on purpose: DROP INDEX
+-- CONCURRENTLY cannot run inside a transaction block, and both
+-- src/db/migrate.ts and tests/herd-postgres.test.ts send each
+-- migration file as a single simple-protocol query string. A
+-- multi-statement string would run inside an implicit transaction
+-- and fail; a single statement autocommits.
+DROP INDEX CONCURRENTLY IF EXISTS whatsapp_connector.ix_event_inbox_unprocessed;
