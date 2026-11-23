@@ -9,6 +9,7 @@ const releaseClaim = vi.fn()
 const fakeSessions: {
   connectionId: string
   capability: string
+  latestQr: string | undefined
   start: ReturnType<typeof vi.fn>
   stop: ReturnType<typeof vi.fn>
   lostClaim: (reason: string, err?: unknown) => void
@@ -43,6 +44,7 @@ vi.mock('../src/observability/logger.js', () => ({
 vi.mock('../src/sessions/session.js', () => {
   class Session {
     runtimeState = 'starting'
+    latestQr: string | undefined
     start = vi.fn(async () => {})
     stop = vi.fn(async () => {})
     constructor(
@@ -139,6 +141,24 @@ describe('SessionManager herding controls', () => {
     expect(first).toBe(second)
     expect(claimConnection).toHaveBeenCalledTimes(1)
     expect(fakeSessions).toHaveLength(1)
+  })
+
+  it('renders the pairing QR large enough to scan from the chat bubble', async () => {
+    const { default: qrLib } = await import('qrcode')
+    const toDataURL = qrLib.toDataURL as unknown as ReturnType<typeof vi.fn>
+    toDataURL.mockResolvedValue('data:image/png;base64,cXItaW1hZ2U=')
+    const sessionManager = await load()
+    await sessionManager.start('c1')
+    fakeSessions[0]!.latestQr = 'pairing-qr-data'
+
+    const result = await sessionManager.qr('c1')
+
+    expect(result).toEqual({ outcome: 'qr_ready', image_base64: 'cXItaW1hZ2U=' })
+    expect(toDataURL).toHaveBeenCalledWith('pairing-qr-data', {
+      errorCorrectionLevel: 'M',
+      margin: 4,
+      scale: 16
+    })
   })
 
   it('retries recovery with exponential backoff after retryable claim failures', async () => {
