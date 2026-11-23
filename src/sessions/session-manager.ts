@@ -299,7 +299,15 @@ export class SessionManager {
         ? { outcome: 'already_authorized' as const }
         : { outcome: 'preparing' as const, message: 'QR not available yet' }
     }
-    const dataUrl = await QRCode.toDataURL(qr, { errorCorrectionLevel: 'M' })
+    // Render large with an integer scale: WhatsApp recompresses uploaded
+    // images and renders them at chat-bubble size, so the default ~300px
+    // PNG only becomes scannable after the guardian taps it open. A 16px
+    // module keeps the QR crisp directly in the message bubble.
+    const dataUrl = await QRCode.toDataURL(qr, {
+      errorCorrectionLevel: 'M',
+      margin: 4,
+      scale: 16
+    })
     return {
       outcome: 'qr_ready' as const,
       image_base64: dataUrl.replace(/^data:image\/png;base64,/, '')
